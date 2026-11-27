@@ -2226,9 +2226,13 @@ side loaded from its file is no proof of its pool's migrations: until its
 so the migration objects of its pool and their clone-metadata records,
 which wait for every side of the pool to be held (`spFullyKnown`), are
 neither removed nor named by any sweep, a `SyncupDn`'s included; the side's
-own pass then names its wait while the node holds such an object or record
-of its pool that no held side claims (`migrHeldBack`), which brings its
-`SyncupSide`. What the start names is in the observations' codes, and the
+own pass then names its wait while the node holds a migration device
+(`DnMigrSrcName`, or a destination's dm-clone or its clone-metadata
+wrapper) or a clone-metadata record of its pool that no loaded side claims
+(`migrHeldBack`), which brings its `SyncupSide`. A source export or a
+destination's source connection left alone names no wait, so it stays
+until a `SyncupSide` of the pool's sides comes for another reason
+(Known limits). What the start names is in the observations' codes, and the
 revision of a file older than the worker's differs from the one it wants,
 so the worker's first round sends the `Syncup*` (`dnv-worker.md` RW4); a
 clean start stays clean. Reason: removal by an older list frees the
@@ -2541,23 +2545,27 @@ it can own none of an sp it has nothing of. It never touches a side that
 that lost `--local-store` but kept its disk must rebuild those sides from
 their records, and sweeping them would free the extents and send the next
 `SyncupSide` through the provisioning protocol again, zeroing live data.
-Nor, while such a side is not held — its file absent or unreadable — does it
-judge a migration object of that side's sp: the migration objects follow the
-known-with-state rule of the `CloneMetaRecord` (the record rule, below).
-Each names `(sp_id, migr_id)` and no side, and the claim rule reads held
-sides' requests only, so while any side of its sp is known by its pointer
-alone, "no held side claims it" proves nothing — that side may be the one
-playing the migration. Judging them anyway, in the `SyncupDn` that brings a
+Nor, while such a side is not held — its file absent or unreadable, or
+loaded from its file and not yet synced by a `SyncupSide` of this process
+(`sideState.synced`, DN2) — does it judge a migration object of that side's
+sp: the migration objects follow the known-with-state rule of the
+`CloneMetaRecord` (the record rule, below). Each names `(sp_id, migr_id)`
+and no side, and the claim rule reads the loaded sides' requests only, so
+while any side of its sp is not held, "no loaded side claims it" proves
+nothing — that side may be the one playing the migration. Judging them anyway, in the `SyncupDn` that brings a
 lost store's pointer list back, would take a source's `DnMigrSrcName` and
 its `MigrSrcNqn` export out from under the destination's dm-clone, whose
 reads of every region not yet hydrated then fail on the leg the host is
 using. Such an object is neither removed nor named as a leftover — naming it
 would only have the worker re-send a `SyncupDn` that must not remove it —
-and the wait ends by itself: the side's Check round replies
-`ReplyCodeUnknownObject` until its `SyncupSide` stores the request, and that
-rejection is what brings the `SyncupSide` (`dnv-worker.md` RW4); once every
-side of the sp this node may host is held, the next pass judges the object
-by the claim rule again. A destination's source connection waits with its
+and the wait ends by itself: a side with no file loaded answers its Check
+round `ReplyCodeUnknownObject` until its `SyncupSide` stores the request, and
+that rejection is what brings the `SyncupSide` (`dnv-worker.md` RW4); a side
+loaded from its file names its own wait while the node holds a migration
+device or a clone-metadata record of its pool that no loaded side claims
+(`migrHeldBack`, DN2), so its rounds answer the leftover code, which brings
+it; once every side of the sp this node may host is held, the next pass
+judges the object by the claim rule again. A destination's source connection waits with its
 dm-clone, not only behind L3's stop rule: with the clone out of the chain,
 L3 would find no clone of its own to fail on and disconnect the source under
 the live one. It also takes the namespace-less exports nobody can attribute,
@@ -2568,8 +2576,9 @@ nothing.
 **Scope 2, side-level.** Inside `convergeSide` and ahead of its build phase
 (`SyncupSide`), under whatever DN1 locks that caller holds (SH10/SH11); in a
 converge of a side whose request is still its stored file's, no
-`SyncupSide` of this process accepted, it runs its transitions and names
-its chain, and removes nothing (DN2, The start removes nothing). Its
+`SyncupSide` of this process accepted, it runs its transitions and P0 and
+names its chain, and removes no device and frees no record (DN2, The start
+removes nothing). Its
 wanted set is exactly what the build phase would ensure for this side's
 plan were DN9's gate open, with the source deferral of `architecture.md`,
 Migration, already applied: `DnSideName` at every level (DN11), the per-CN
@@ -2966,8 +2975,8 @@ re-allocate them and zero live data away (`provisioned` false) or, at
 ("record missing", DN9) — both outcomes lose the data. A `CloneMetaRecord`
 is an orphan only when no held side claims its `(sp_id, migr_id)` (a
 claim no level gates, above) **and**
-every side of that `sp_id` this node may host is one whose local state the
-agent actually holds — otherwise a side it has not heard from yet could
+every side of that `sp_id` this node may host is held, accepted by a
+`SyncupSide` of this process (`sideState.synced`, DN2) — otherwise a side it has not heard from yet could
 still own the slot, and freeing it would strand an in-flight migration
 whose hydration is supposed to resume from disk (`architecture.md`,
 Migration). Freeing a record while its device still maps those extents is
@@ -4547,8 +4556,10 @@ needed, and the worker never turns one into an `err_epoch`
   refusal, with an old error, until the next save of anything, and the
   worker would offer the node for no new side for that long; and the bytes
   are random, since a file system that compresses or shares blocks stores
-  zeros in next to no room. **The store test.** While the second state is
-  clear, the agent's store test loop, which the startup pass starts once
+  zeros in next to no room.
+
+  **The store test.** While the second state is clear, the agent's store
+  test loop, which the startup pass starts once
   it has ended, writes the probe file of a disk node it holds every
   `DnStoreTestInterval`, `DnStoreTestSize` random bytes through the
   store's own write and under its bound, under a trace id of
@@ -4737,6 +4748,14 @@ else reported through `agent_reply` is still a protocol-level refusal.
 
 ## Known limits
 
+* A migration source export or a destination's source connection that a
+  side loaded from its file at the start does not claim is held back with
+  its pool's migration objects until every side of the pool is synced (DN2,
+  Scope 1), but names no wait: the side's own pass names one only for a
+  migration device or a clone-metadata record (`migrHeldBack`). Left alone,
+  as after a failed disconnect, it stays until a `SyncupSide` of the
+  pool's sides comes for another reason, such as a new revision, while the
+  side's rounds read clean.
 * The migration destination's connect to the migration source export
   (DN13) takes no connect place and dials nothing first, as the cn agent's
   connects do (`cnagent.md` CN10). A source disk node whose machine is down

@@ -4666,7 +4666,11 @@ destination, which the cancel throws away. At the bound it answers
 and carrying the `loss`, and the operator checks with `dnvctl cntlr
 inspect`, before any write, that `applied_revision` reaches that revision
 and the leg row reads OK with no reason, as a report from before the
-cancel, when the leg had two sides, reads that too. A forced cancel thus
+cancel, when the leg had two sides, reads that too. A recopy that ends,
+and whose mark the sp worker clears (`dnv-worker.md` AR13), between two
+of the wait's tries leaves no report that names it, so the wait runs to
+its bound and answers `DEADLINE_EXCEEDED` though the cancel and the copy
+are done; the same check then shows it. A forced cancel thus
 loses nothing a host was told was done in an md-raid1 group with another
 leg in sync, when no host writes until its answer; in a pool that keeps one
 leg per group the writes since the cutover are lost, which the reply's
@@ -5949,7 +5953,12 @@ the `ERROR` pool row of a slice whose metadata its `thin_check` refused, and
 sets on the `PENDING` or `ERROR` subsystem row of a shared NQN, which no
 health rule reads and to whose `PENDING` row the gateway's status read
 gives a text of its own (`gateway.md` GW20);
-`RES_REASON_AWAITING_CUTOVER`, which `dnagent.md` DN13 sets on a migration
+`RES_REASON_LEG_PATH_NOT_SOLE`, which `cnagent.md` CN28 sets on the `OK`
+row of a one-sided leg with a recopy mark while its side is not known to
+be the only path to it on the primary's node, which no health rule reads,
+and for whose absence the gateway's forced cancel waits and the sp
+worker's recopy clear looks (Migrations, The forced cancel; `dnv-worker.md`
+AR13); `RES_REASON_AWAITING_CUTOVER`, which `dnagent.md` DN13 sets on a migration
 destination's two `PROVISIONING` migration rows and `dnv-worker.md` RW18
 reads; `RES_REASON_SP_LEVEL`, which `cnagent.md` CN19 sets on every
 `MISSING` row its pool's level suppresses; and `RES_REASON_SOURCE_FAULT`,

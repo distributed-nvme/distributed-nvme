@@ -342,10 +342,13 @@ CM3). An agent whose check finds no cause logs neither.
 A dn agent's store test (`dnagent.md` DN18, The store test) logs, under
 the trace id of its own each test takes, one Error record `local store
 test failed` with `error` for a test whose write was refused or whose
-removal of the file failed, and the same record at Info for a test cut
-off, by its bound or by the agent's end, which says nothing of the disk
-and which the next test runs again (R6); a test that holds logs nothing of
-its own beside the `OsClient`'s records of its write and removal.
+removal of the file failed, and the same record at Info for a test whose
+write was cut off, by its bound or by the agent's end, or whose removal
+was cut off before it started, which says nothing of the disk and which
+the next test runs again (R6); a removal killed while it runs, by its
+bound or by the agent's end, ends with the command's own error and logs at
+Error. A test that holds logs nothing of its own beside the `OsClient`'s
+records of its write and removal.
 
 ### The cut of a removed host
 

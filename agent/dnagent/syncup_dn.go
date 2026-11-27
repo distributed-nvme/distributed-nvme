@@ -355,7 +355,8 @@ func (s *DnAgentServer) testStore(ctx context.Context) {
 		s.nf.LocalDnProbePath(req.GetClusterId(), req.GetDnId()),
 		common.DnStoreTestSize); err != nil {
 		// A test cut off by its bound or by the agent's end says nothing of
-		// the disk and the next test runs again: Info (log.md R6).
+		// the disk and the next test runs again: Info (log.md R6). A removal
+		// killed while it runs ends with the command's error, at Error.
 		level := slog.LevelError
 		if errors.Is(err, context.Canceled) ||
 			errors.Is(err, context.DeadlineExceeded) {

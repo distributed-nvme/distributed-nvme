@@ -794,8 +794,9 @@ prefix is load-bearing: the cn suite's mutation grep (`mutations` in
 `os write block` explicitly, and the continuous health probes must fall out
 of that grep **by construction** rather than by a path-based exemption; an
 `os read block direct` record is a ReadBlockDirect read, the cn agent's
-superblock read, the md replay's or the CSI node plugin's read of a volume's
-start, and never a probe's. `os write block` is the dn
+superblock read, the dn agent's read of its disk header in a check round
+(`dnagent.md` DN18), the md replay's or the CSI node plugin's read of a
+volume's start, and never a leg prober's. `os write block` is the dn
 agent's `diskmeta.go` record, so a "probe …" record and an "os …" record can
 never be confused for one another.
 

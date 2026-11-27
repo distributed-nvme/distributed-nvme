@@ -160,8 +160,10 @@ type sideClaims struct {
 // not already visible here — which is what makes it safe to run this outside
 // the node write lock. That holds for what THIS process builds. What a side
 // built before a restart that lost the local store has no claim here until
-// that side's request comes back, which is why both scopes judge a migration
-// object only once every side of its sp this node may host is held. Both read
+// that side's request comes back, and a side loaded from its file may claim
+// less than the node holds, which is why both scopes judge a migration
+// object only once every side of its sp this node may host is held,
+// accepted by a SyncupSide of this process (sideState.synced). Both read
 // that set (knownSides) before the claims: a side stored in between is then
 // either still missing from it, which keeps the gate shut, or visible here.
 func (s *DnAgentServer) collectClaims(
@@ -992,7 +994,8 @@ func (s *DnAgentServer) migrHeldBack(
 
 // cloneMetaGate is the proof a clone-metadata slot must pass before its
 // record is released: no side claims the migration, and every side of that sp
-// which this node may host is one whose local state the agent actually holds.
+// which this node may host is held, accepted by a SyncupSide of this process
+// (sideState.synced).
 // The slot lives in the [D13] on-disk table, so releasing one early is a
 // table-level mistake, not a local one. Without the second half a side
 // we have not heard from yet could still own the slot, and freeing it would
@@ -1060,10 +1063,13 @@ func sideIdAttrs(plan *sidePlan) []any {
 // :3: connections are left out of the chain, neither removed nor named: a
 // side known by its pointer alone may be the one playing the migration, its
 // claim taken by a lost store, and taking a source's d2 and :3: export
-// strands the destination's dm-clone. The wait ends by itself: that side's
-// Check round answers "unknown side" until its SyncupSide stores the
-// request, and from then on the verdicts its reads store (SH29), which the
-// Check rounds answer, name every unwanted one, which re-drives its removal.
+// strands the destination's dm-clone. The wait ends by itself: a side with no
+// file loaded answers its Check round "unknown side" until its SyncupSide
+// stores the request, and a side loaded from its file names its own wait
+// (migrHeldBack) while a migration device or record of its pool is not
+// claimed; from its SyncupSide on, the verdicts its reads store (SH29), which
+// the Check rounds answer, name every unwanted one, which re-drives its
+// removal.
 func (s *DnAgentServer) buildSideChain(
 	ctx context.Context,
 	plan *sidePlan,
@@ -1682,11 +1688,13 @@ func (s *DnAgentServer) sweepDn(
 	// side's own SyncupSide — "no held side claims it" proves nothing: that
 	// side may be the one playing the migration, and taking a source's d2
 	// and :3: export strands the destination's dm-clone. Such an object is
-	// neither removed nor named until every side of its sp in `known` is held —
-	// the proof the clone-metadata record waits for too (cloneMetaGate), and
-	// the one the side-level pass waits for (buildSideChain) — and the wait
-	// ends by itself: that side's Check round answers "unknown side" until
-	// its SyncupSide arrives. The connection is gated with its clone, not
+	// neither removed nor named until every side of its sp in `known` is held,
+	// accepted by a SyncupSide of this process — the proof the clone-metadata
+	// record waits for too (cloneMetaGate), and the one the side-level pass
+	// waits for (buildSideChain) — and the wait ends by itself: a side with
+	// no file loaded answers its Check round "unknown side" until its
+	// SyncupSide arrives, and a side loaded from its file names its wait
+	// (migrHeldBack). The connection is gated with its clone, not
 	// only through L3's stop rule: with the clone out of the chain, L3 would
 	// find no clone of its own to fail on and disconnect the source under it.
 	fullyKnown := func(spId uint64) bool {

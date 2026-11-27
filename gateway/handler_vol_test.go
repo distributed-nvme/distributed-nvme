@@ -5197,8 +5197,9 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 	}
 	// The cutover has started, so only a forced cancel ends it
 	// (migrCancelAllowed).
-	// The forced cancel's answer waits for the primary's report to name
-	// the old side as the leg's serving side (The forced cancel).
+	// The forced cancel's answer waits for the primary's report to read
+	// the leg's row OK with no reason, the old side its only path there
+	// (architecture.md, Migrations, The forced cancel).
 	fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
 		[]uint64{volDataLegA, volDataLegB}, volDataSideA, env.spRev()+1))
 	if _, err := env.srv.CancelMigration(
@@ -5228,8 +5229,9 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 // md-raid1 group of two legs the leg is to be copied again, its
 // recopy_revision the revision the cancel committed, and the reply says so,
 // with no loss, as the primary's report holds the other leg in sync. The
-// answer comes once that report names the old side as the leg's serving
-// side (The forced cancel). The leg gets its source back as its only side
+// answer comes once that report reads the leg's row OK with no reason, the
+// old side its only path there (architecture.md, Migrations, The forced
+// cancel). The leg gets its source back as its only side
 // and dn-c ends as the fixture wrote it, but for its revision.
 func TestCancelMigrationAfterTheCutover(t *testing.T) {
 	env := newVolEnv(t)
@@ -5293,10 +5295,11 @@ func TestCancelMigrationAfterTheCutover(t *testing.T) {
 	}
 }
 
-// TestForcedCancelWaitsForTheOldSide pins the forced cancel's wait (The
-// forced cancel): the answer comes only once the primary's report names the
-// old side as the leg's serving side, which here it does a little after the
-// cancel's write; with no such report it answers DEADLINE_EXCEEDED at the
+// TestForcedCancelWaitsForTheOldSide pins the forced cancel's wait
+// (architecture.md, Migrations, The forced cancel): the answer comes only
+// once the primary's report reads the leg's row OK with no reason, the old
+// side its only path there, which here it does a little after the cancel's
+// write; with no such report it answers DEADLINE_EXCEEDED at the
 // bound, the cancel committed. And the loss the reply words from the
 // primary's report before the write: none with another leg in sync, a loss
 // with none, and a loss that says the report did not tell for a report
@@ -6040,8 +6043,9 @@ func volTokenCases() []volTokenCase {
 			call: func(env *volEnv, rev *pb.SpRev) error {
 				// The fixture's migration has no cutover pending, so the
 				// cancel needs force (migrCancelAllowed), and its answer
-				// waits for the primary's report to name the old side as
-				// the leg's serving side (The forced cancel).
+				// waits for the primary's report to read the leg's row OK
+				// with no reason (architecture.md, Migrations, The forced
+				// cancel).
 				fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
 					[]uint64{volDataLegA, volDataLegB}, volDataSideA,
 					env.spRev()+1))
@@ -6318,8 +6322,9 @@ func TestFinishMigrationRefusesAnotherMigrationInPhaseTwo(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	// The forced cancel's answer waits for the primary's report to name
-	// the old side as the leg's serving side (The forced cancel).
+	// The forced cancel's answer waits for the primary's report to read
+	// the leg's row OK with no reason, the old side its only path there
+	// (architecture.md, Migrations, The forced cancel).
 	fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
 		[]uint64{volDataLegA, volDataLegB}, volDataSideA, env.spRev()+1))
 	if _, err := env.srv.CancelMigration(

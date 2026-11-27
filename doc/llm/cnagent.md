@@ -682,7 +682,7 @@ and is refused at zero, the revision the process holds (`dnagent.md`
 SH5). Reason: two
 workers can drive one pool for a short time at a change of its owner
 (`dnv-worker.md` VW7), so an old owner can still send a request older than
-the skipped file, and with the gate at zero the agent took it; on a primary
+the skipped file, and with the gate at zero the agent would take it; on a primary
 its converge removes what the request does not name, a volume made since
 with its thin id (CN14). The floor refuses no request that a start which
 loaded the file would take, save where two files name one cntlr, which
@@ -1100,8 +1100,9 @@ steps between the lookup and the wrapper's — the in-sync test of the other
 member before a cut, whose read of the array in sysfs can wait seconds
 behind a dead leg (`Md.Detail`; The cut of a migrating leg's path, below),
 when no cut follows it and so no lookup, the disconnect of a dead path
-(below) and a primary's rescan of a stale path with its pauses (The write
-cache of a leg's path, below) — can take seconds. A head's name holds its
+(below), and a primary's reads of its stale paths when no rescan of them
+goes through and so no lookup follows (The write cache of a leg's path,
+below) — can take seconds. A head's name holds its
 subsystem's number ("nvme<subsystem>n<head>"), the number of the
 subsystem's first controller, which the kernel frees with the subsystem
 and gives to the next new controller; one that starts a new subsystem,
@@ -2982,8 +2983,9 @@ content as of the cutover, which md counts whole. Every primary's pass
 looks such a leg up in its walk, on both channels, and reads whether its side alone
 serves it on this node (`legServingSide`, `subsysView.servingSide`): every
 live controller of the leg's subsystem has that side's address and one
-reads live and ANA optimized, and none of another address can take IO
-again (CN28 gives the leg row's reason). The converge copies the leg again
+reads live and ANA optimized, none of another address can take IO again,
+and no controller's address read failed to answer (CN28 gives the leg
+row's reason). The converge copies the leg again
 (`recopyLegs`, in the member reconciliation), one leg of a group a pass:
 for a leg of
 an md-raid1 group's `leg_list` whose mark carries a revision this
@@ -3205,11 +3207,11 @@ when a commit fails, as when every leg of a data group is lost for a few
 seconds, and opens a pool whose metadata carries the mark read-only,
 wherever it is loaded. So before the primary creates a slice's pool device
 it reads the superblock at the start of the meta concat with direct IO
-(`readThinNeedsCheck`), save where the device goes between the step's two
-reads of it, which only a removal by hand makes, and the step's second
-create loads the pool unchecked: a block whose magic is not dm-thin's, as a fresh
+(`readThinNeedsCheck`): a block whose magic is not dm-thin's, as a fresh
 pool's zeroed metadata, carries no mark, and with no mark the pool is
-created as usual. With the mark set it loads no pool and runs one
+created as usual. Only a pool device removed by hand between the step's
+two `dmsetup info` reads of it is created by the step's second create,
+unchecked. With the mark set it loads no pool and runs one
 `thin_check --clear-needs-check-flag` on the meta concat in the background
 (`thinCheckGate`, `startThinCheck`), which checks the whole metadata and
 clears the mark only when the check passes, under `ThinCheckTimeout`.
@@ -6114,7 +6116,10 @@ superblock reads of CN12's take-back check and identity check, the
 holders listing and superblock reads of CN12's re-assembly, and those of
 the names of an absent array and of a forced start (CN30), the first of
 which, for CN12's case 1, also asks whether the array's name is in use
-with one `lsblk`). Every
+with one `lsblk`, the superblock reads of the new legs of a repair whose
+abort waits with no array (CN12, The abort), and the direct read of a
+slice's metadata superblock for the needs-check mark (CN13, The
+needs-check mark)). Every
 row
 reports against
 the effective desired state (CN9): a resource the provisioning gate
@@ -6280,7 +6285,13 @@ The rows, each with its `res_name` and what its probe checks:
   row comes from its cut's last listing. While the node's port itself
   is not there the row reads `RES_STATUS_ERROR` "the port is not there", on
   a converge too, which reads the subsystem again after a link that failed
-  (`linkRow`); the same holds for a transfer's subsystem.
+  (`linkRow`); the same holds for a transfer's subsystem. A subsystem of a
+  shared NQN reads by CN16's rule instead (`reportSharedSubsys`: the
+  builder or a cntlr with no namespace under the NQN `RES_STATUS_PENDING`,
+  any other `RES_STATUS_ERROR`, with `RES_REASON_SHARED_NQN`), and a read
+  that finds the kernel subsystem holding a namespace over another pool's
+  ns-dev, which the converge replaces, reads `RES_STATUS_ERROR` naming it
+  (`foreignNs`; CN16, A shared NQN).
 * `ns_id_to_namespace`, named by the NQN and the namespace index: the
   nvmet namespace is enabled, with the "device_path", "uuid" and "nguid"
   as desired (the identity compared through `agent.SameNsId` — configfs
@@ -6466,8 +6477,9 @@ The rows, each with its `res_name` and what its probe checks:
   its status and details kept (`markNotSole`), while its side is not known
   to be the only path to it on this node: a controller of its subsystem
   that is not gone, deleting or dead has another address, as one that
-  reconnects can take IO again, no controller of its own reads live and
-  ANA optimized, or the lookup did not answer (CN12, The recopy); the
+  reconnects can take IO again, a controller's address read did not
+  answer, no controller of its own reads live and ANA optimized, or the
+  lookup did not answer (CN12, The recopy); the
   primary sets it on both channels, a standby, whose paths are not
   optimized by design, never, and no health rule reads it. A forced migration cancel's
   answer waits for the primary's row of the leg to read OK without it
@@ -7248,9 +7260,11 @@ stores instead is CN23's.
 * A `leg_list` member is put back by a re-add from md's write-intent
   bitmap (CN12, The put-back), and md clears that bitmap behind a copy
   onto another new leg. A CREATED repair whose bad leg is dead adds its
-  new leg, and md copies onto it at once; when the new leg dies during the
-  copy, the worker aborts and cancels the repair, and the bad leg stays in
-  `leg_list`. An array built anew before that leg returns, as after a
+  new leg, and md copies onto it at once; when the new leg dies before a
+  report of the primary gives the repair's started verdict (the new leg
+  holds a place while md copies onto it), the worker aborts and cancels
+  the repair, and the bad leg stays in `leg_list`; a repair reported
+  started is finished instead, its bad leg retired. An array built anew before that leg returns, as after a
   failover or a reboot of the controller node, puts the leg back with a
   plain `mdadm --add`, a re-add from the bitmap that lacks the regions the
   copy passed: md holds the leg in sync with old bytes there, and serves

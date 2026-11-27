@@ -136,8 +136,8 @@ and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
 copy, and the suite's own check of thin_check to thinrepair, on its second
 VM, so a VM without one fails in the stage that needs it rather than a run
 that might never reach one. The agent itself runs thin_check earlier, in
-repair's re-assembly and in groupcut's cut, on a VM the suite does not
-check for it; the node check (`dnagent.md` CM5) lists it among the cn's
+groupcut's cut on CN1, which the suite never checks for it, and in repair's
+re-assembly on CN2, before thinrepair checks it; the node check (`dnagent.md` CM5) lists it among the cn's
 commands.
 
 ## Lab facts
@@ -1329,9 +1329,9 @@ it), no write failed, writes came back on CN2, every acknowledged block
 reads back and the pool reads writable with no needs_check flag; the gate
 names every check that fails, but reads the held write only where no write
 failed, as a failed write shows the rule held a leg path too, and a block
-rewritten behind the read back, a gate cut of 20 s (`GCUT_GATE_SECS`) and a
+rewritten behind the read back, a gate cut of `GCUT_GATE_SECS` and a
 wait for writes back of no time (`GCUT_BACK_SECS`) each fail it; then one
-cut of 8 s (`GCUT_CHECK_SECS`), which passes only if no write came back on
+cut of `GCUT_CHECK_SECS`, which passes only if no write came back on
 CN2, the failover ran, CN1's pool row read PROVISIONING with the check's
 details and then the pool read writable with no needs_check, the host's new write through CN1
 succeeded and every acknowledged block reads back. With
@@ -1445,7 +1445,7 @@ fails the case), the agents' logs, both
 VMs' dm, md, nvmet and host state, each read bounded, and the failing
 stage's trace id, but for clone_xfer's and thinbm's token buckets, which it
 removes, as a bucket would slow any suite that runs on the VMs before the
-next cleanup, thinbm's host writer, which it stops, and pause's and groupcut's cut and their writer, which it removes
+next cleanup, smoke's and thinbm's host writers, which it stops, and pause's and groupcut's cut and their writer, which it removes
 and stops, as the cut would black-hole another suite's connections, redund's drop of new
 connections, which it removes for the same reason, and its netem delay,
 which it removes for the bucket's reason, nodecheck's stalled array and

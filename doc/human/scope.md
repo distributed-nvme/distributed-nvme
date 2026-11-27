@@ -270,7 +270,8 @@ dnvctl always sends a piece's position.
   node's kernel holds one subsystem for each NQN, and the move of a volume
   to another pool asks for the same NQN in both pools. So a cntlr writes
   nothing under a subsystem whose NQN a cntlr of another pool on its node
-  also names, but the ANA group of a namespace over its own volume. The
+  also names, but the ANA group of a namespace over its own volume, and it
+  takes out a namespace of its own that it deletes. The
   cntlr that built the subsystem keeps it as it was built: its hosts keep
   their paths, its namespaces still move to ANA optimized or inaccessible
   as its role asks, and its subsystem row reads pending. A host added to
@@ -1171,8 +1172,10 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   leg's start, so a sector on which reads fail often enough can keep the
   check from reaching it. The worker gives that check up after two days
   and asks again one interval later; for a group whose leg waits for the
-  check before it is replaced for its bad blocks, it asks again at once,
-  and the pool's other groups then get a check only once in two days. A cluster created before this
+  check before it is replaced for its bad blocks, it asks again once no
+  check of the pool is asked for, ahead of every other group, and
+  meanwhile at most one other group of the pool gets a check each two
+  days. A cluster created before this
   setting existed, or with zero, has no check. A leg with slow IO reads
   ok, and every write of the group waits for it. `dnvctl cntlr inspect`
   shows how long the primary's last small test write and read of each leg
@@ -3037,8 +3040,10 @@ design:
   "created", once its bad leg has left the array, and md starts its copy
   onto the new leg at once. md keeps a record of the regions written while
   a leg is away, but it clears that record behind the copy onto the new
-  leg. When the new leg dies during its copy, the repair is aborted and
-  cancelled, and the bad leg stays in the group's list. If the array is
+  leg. When the new leg dies early in its copy, before the controller
+  node reports that the new leg holds its place in the array, the repair
+  is aborted and cancelled, and the bad leg stays in the group's list; a
+  repair reported started is finished instead, and its bad leg retired. If the array is
   then built anew, by a failover or a reboot of the controller node,
   before the bad leg comes back, the primary takes the bad leg back by a
   short copy of the regions the record names: md marks it in sync within

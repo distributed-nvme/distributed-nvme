@@ -422,8 +422,9 @@ debug, after which a round is quiet again. The agent then restarts at
 refused, that the node's store row reads the refusal until a probe holds, and
 that a restart keeps what the agent accepted (`dnagent.md` SH4 to SH6, DN2,
 DN8, DN18). One node's agent runs over a small tmpfs that holds a copy of its
-local store, so it holds what it held before, and one file fills the tmpfs
-until a write fails. Every request the case expects refused for its save
+local store, so it holds what it held before, and two files, written a
+moment apart, fill the tmpfs until a write fails, the second taking the
+room the store test's removal of its file gives back. Every request the case expects refused for its save
 carries a revision above the one the agent holds for its object, so the
 stale-revision gate cannot be what refuses it, and the reply's details name the
 failed save. A disk node request that adds a side is refused with
@@ -444,7 +445,9 @@ rounds before and after the restart agree as in the restart case, the store row
 aside, at the revisions of the last accepted requests, the node's devices and
 exports are the same, the new log holds no mutating command, and the store row
 reads the error before the restart and OK after it, since a restart forgets the
-refusal (`dnagent.md`, Known limits). Once the pool is torn down, the agent
+refusal until its first store test, one `DnStoreTestInterval` after the
+startup pass, which the round after the restart comes before (`dnagent.md`,
+Known limits; DN18, The store test). Once the pool is torn down, the agent
 goes back to its disk store, holding the last request it accepted. The other
 node takes no part.
 

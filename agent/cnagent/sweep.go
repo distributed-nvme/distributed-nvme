@@ -2729,8 +2729,10 @@ func (s *CnAgentServer) sweepCntlr(
 // the stack a deferred build holds back on purpose, no thin row whose pool
 // has lost its thin id (RES_REASON_THIN_ID_LOST) or holds a thin id the
 // agent does not adopt for a new volume (RES_REASON_THIN_ID_NOT_ADOPTED), no
-// pool row that reads needs_check (RES_REASON_POOL_NEEDS_CHECK) or failed
-// (RES_REASON_POOL_FAILED), and no row of a transfer whose origin the
+// pool row that reads needs_check (RES_REASON_POOL_NEEDS_CHECK), failed
+// (RES_REASON_POOL_FAILED) or damaged metadata
+// (RES_REASON_POOL_META_DAMAGED), no subsystem row of a shared NQN (CN16,
+// A shared NQN), and no row of a transfer whose origin the
 // request no longer names, none of which a converge cures, save a new volume
 // refused because its header read failed: a later converge reads the
 // headers again and can then build it, and a read names that volume absent

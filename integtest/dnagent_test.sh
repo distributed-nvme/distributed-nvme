@@ -5332,7 +5332,9 @@ case_store_full() {
 	local counts='.dn_info.disk_counts | "\(.total_ext_cnt // "0") \(.free_ext_cnt // "0") \(.side_rec_cnt // "0") \(.side_recs_match // false)"'
 	# As the restart case's: epochs and the reply's stamp differ by nature.
 	# The store row too: a restart forgets the refusal until a save fails
-	# again (dnagent.md, Known limits), so it is checked on its own.
+	# again or its first store test, one DnStoreTestInterval after the start
+	# (dnagent.md, Known limits; DN18, The store test), so it is checked on
+	# its own.
 	local norm='del(.obs_stamp) | del(.dn_info.store_info) | walk(if type == "object" and has("epoch") then del(.epoch) else . end)'
 	local out got sums res provrev arev brev refrev bnqn name when snap muts
 	bnqn=$(side_to_cn_nqn "$CLUSTER" "$sp" "$bleg" "$cn")

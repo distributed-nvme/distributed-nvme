@@ -76,8 +76,9 @@ func (f *thinCheckFix) runEnded(t *testing.T) {
 // from the next pass every thin row of the slice too, on the converge and
 // on the read; once the check passes it clears the mark, the read names the
 // absent pool, and the next converge loads the pool with no mark, its row
-// OK. A check that fails leaves the pool unloaded and its row ERROR with
-// RES_REASON_POOL_META_DAMAGED on both channels, its thin rows PROVISIONING,
+// OK. Checks that fail thinCheckRefusals times in a row leave the pool
+// unloaded and its row ERROR with RES_REASON_POOL_META_DAMAGED on both
+// channels, its thin rows PROVISIONING,
 // and the read names nothing. A demotion stops a run that goes on.
 func TestTheNeedsCheckMarkIsCheckedBeforeThePoolLoads(t *testing.T) {
 	t.Run("the check passes", func(t *testing.T) {

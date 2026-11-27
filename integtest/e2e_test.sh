@@ -18566,8 +18566,10 @@ copy_src_sp_build() { # [<td size> <pattern MiB> <what> [standby]]
 		"cn$cnv ($addr) — one slice, --redund none, one cntlr, a" \
 		"$((size / 1048576)) MiB thin device with $mib MiB written"
 
-	# --slots 0: cntlr_cnt must not exceed len(cntlid_slot_list)
-	# (CreateStoragePool (gateway/storagepool.go)), and one cntlr needs one slot.
+	# --slots "$slots": cntlr_cnt must not exceed len(cntlid_slot_list)
+	# (CreateStoragePool (gateway/storagepool.go)), and one cntlr needs one
+	# slot; a build with a standby (fourth argument "standby") reserves slot
+	# 1 for the cntlr copy_src_standby creates, so it passes 0,1.
 	# --stripe-size names sp0's stored stripe, STRIPE_SIZE: a clone of this
 	# one-slice pool into sp0 then stacks to sp0's own stripe times its slice
 	# count, the least common multiple of the two pools' products, and

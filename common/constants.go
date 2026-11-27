@@ -168,9 +168,10 @@ const (
 	// MigrCancelWaitSeconds bounds how long a forced CancelMigration's
 	// answer waits, after its write, for the primary to use the old side's
 	// path alone (architecture.md, Migrations): the old side's disk node and
-	// the new side's each apply the cancel at their next syncup, which the
-	// worker sends within a few check rounds, and a minute leaves room for a
-	// slow round without holding the caller long.
+	// the new side's each apply the cancel at their next syncup, and the
+	// primary at its own cntlr's, which the worker sends within a few check
+	// rounds, and a minute leaves room for a slow round without holding the
+	// caller long.
 	MigrCancelWaitSeconds = 60
 	MaxSideCntPerDn       = 1024
 	MaxCntlrCntPerCn      = 256

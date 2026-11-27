@@ -264,8 +264,8 @@ type cntlrState struct {
 	mdChecks map[uint64]mdCheckRun
 	// recopies holds, per leg id, the revision of the recopy mark
 	// (Leg.recopy_revision) whose recopy this incarnation ran: the leg's
-	// member failed, removed, its md superblock zeroed and the leg added
-	// fresh (CN12, The recopy). In memory only: an agent restart forgets
+	// member failed, removed and its md superblock zeroed, its fresh add
+	// then due (CN12, The recopy). In memory only: an agent restart forgets
 	// it, and the next converge copies the leg once more, which a member in
 	// sync makes cost time alone. Every converge drops the entry of a leg
 	// whose request carries no mark or a mark of another revision

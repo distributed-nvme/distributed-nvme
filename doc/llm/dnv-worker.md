@@ -5146,7 +5146,8 @@ stands in the snapshot while the reading names it done
 (`md_check_done_epoch`; `cnagent.md` CN12, The md check); the other leg
 is clean in the current reading, as the candidate's own test asks.
 Otherwise the leg logs `md_check_waits`, the scan moves on, and AR16 asks
-for the group's check when no request stands in the SP. The joined
+for the group's check when no request stands in the SP and a check suits
+the group (AR16, step 3). The joined
 cancel and create waits the same way, its cancel running alone. Reason:
 the primary takes the bad leg out of the array before it adds the new leg
 (`cnagent.md` CN12), so the group runs on the clean leg alone during the
@@ -5157,10 +5158,11 @@ within the bound is the proof that the legs the group held then read
 whole, and a group whose repair waits on something else asks for a new
 check at most once in that time while its checks end, so its asks do not
 starve the SP's other groups. A group whose check never reaches its end
-is asked for one again from the pass after its request's bound, ahead of
-every due group (AR16, step 3), so while that lasts the SP's other groups
-get a check only in the pass that ends such a request, one in each
-`MdCheckRequestBound`. The proof does not cover a leg that joined the group after that
+is asked for one again once no request stands, ahead of every due group
+(AR16, step 3); the pass that ends its request at the bound may first ask
+a due group, whose check it then waits for, so while that lasts the SP's
+other groups get a check only in the passes that end such a request, one
+in each `MdCheckRequestBound` at most. The proof does not cover a leg that joined the group after that
 check, as a repair's new leg, which md's copy wrote and no check read back;
 nothing clears `done_epoch` when the group's legs change, so such a leg can
 be the clean leg of a repair within the bound (`scope.md`). A clone meta
@@ -5350,8 +5352,8 @@ finish waits while the pass holds no current reading of the group (the
 other than the repair's bad leg, a leg the new leg copies from, whose
 ranges md copies onto the new leg; ranges on the new leg alone hold
 nothing, since the legs it copied from still hold those regions;
-`reaction skipped` logs the reason, `grp_every_leg_bad_blocks` when the
-new leg carries ranges too. For the retire timer's hold, a leg with
+`reaction skipped` logs the reason, `grp_every_leg_bad_blocks` when every
+leg that stays, the new leg included, carries ranges. For the retire timer's hold, a leg with
 ranges beside a clean leg is replaced by leg repair for its ranges (AR8,
 A leg with bad-block ranges), which ends the hold; the finish's group
 already holds its repair, so no such repair is made for it
@@ -5385,7 +5387,8 @@ carries the snapshot's `SpRev` revision as its expected revision (MD6), so
 a pool that changed since the snapshot the conditions were judged on
 refuses it, and the next pass judges again; an earlier bump of the same
 pass, a stage move's (AR11), the flag's write (AR15), a forced-start
-clear's (AR13), a clone's latch's (CLD13) or a clone's final STM's (CLD9),
+clear's or a recopy clear's (AR13), a clone's latch's (CLD13) or a clone's
+final STM's (CLD9),
 changes it too, so after one the delete is refused as stale and waits a
 pass. A `keep` the operator writes after the snapshot raises no revision,
 so the delete checks the flag again in its own STM and refuses a kept leg
@@ -5478,8 +5481,8 @@ show done or a ref the op skips, `recopy kept` with `clone_deleting` or the
 op's error, and `recopy cleared` naming the group, the leg, the mark's
 revision, the primary, its report's revision and the revision the op's own
 STM committed. Reason: a mark that stayed would copy the leg again at the
-primary's next agent restart, and while it stands the primary looks the leg
-up in each of its passes. A leg that leaves its group, as a repair's
+primary's next agent restart, in an md-raid1 group of more than one leg,
+and while it stands the primary looks the leg up in each of its passes. A leg that leaves its group, as a repair's
 retired bad leg, loses its mark, as a retired leg carries none. The clear is no reaction and not the pass's one action
 (AR2).
 
@@ -5546,8 +5549,9 @@ step 1 records:
    aside) has the request withdrawn and its time kept, so it is asked for
    again once it suits, and the primary stops a check it started for it;
 2. a group never scheduled — no `next_epoch` and no request — gets its
-   first time, save one that step 3's first test asks for a check, which
-   gets its time when that request ends (step 1): half an interval ahead of now plus a share of one interval
+   first time, save each group that passes step 3's first test, which gets
+   its time when a request of its own ends (step 1): half an interval
+   ahead of now plus a share of one interval
    drawn from the group's id, so a new pool's groups spread over half an
    interval to one and a half, and a worker that takes the pool over draws
    the same;
@@ -6086,7 +6090,7 @@ transaction (RW19), the clone flip's (MD6) and the write of `array_made`
 (AR15).
 
 CLD13. **The worker latches a clone whose copy is whole.** For a live SP,
-right after AR13's forced-start clear and before AR3's suppression — so at
+right after AR13's recopy clear and before AR3's suppression — so at
 every `sp_level` — the pass walks the SP's clones in `clone_name_list`
 order and latches each one that is not `deleting` and whose
 `clone_id_to_dm_clone` row, in the current primary's latest report (the

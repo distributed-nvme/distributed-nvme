@@ -331,8 +331,10 @@ const (
 	// reading names md bad-block ranges on (legRanges): a region recorded
 	// on every leg is lost from the group's legs, and a retired leg may
 	// hold its only good copy. reasonGrpEveryLegBadBlocks is the same hold
-	// when every such leg carries ranges. md drops a range only at a later
-	// write that works, so an operator ends the hold (AR12).
+	// when every such leg carries ranges. Leg repair for a leg's ranges
+	// beside a clean leg ends the retire timer's hold; otherwise, and always
+	// for the finish's hold, it ends when md drops the range at a later
+	// write over it that works, or by an operator's step (AR12).
 	reasonGrpLegBadBlocks      = "grp_leg_bad_blocks"
 	reasonGrpEveryLegBadBlocks = "grp_every_leg_bad_blocks"
 )
@@ -4632,8 +4634,8 @@ const (
 //   - a group never scheduled (next_epoch zero, no request) is stamped with
 //     a first time one interval ahead, spread over half an interval either
 //     side by its id (mdCheckSpread), so a new pool's groups do not fall
-//     due together, save one the ranges test below asks for a check, which
-//     gets its time when that request ends;
+//     due together, save each group that passes the ranges test below,
+//     which gets its time when a request of its own ends;
 //   - when no request stands in the pool after the first part, the first
 //     group that holds a candidate for a repair for ranges with no fresh
 //     check (rangesWaitCheck, mdCheckFresh) and that a check suits

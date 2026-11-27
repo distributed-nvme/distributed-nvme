@@ -3539,13 +3539,15 @@ writing before it, after its cutover and right after its reply, each write
 read back once the leg is copied again ([Ending a migration with
 force](#ending-a-migration-with-force)). Stage 04b resets the new side's disk node guest
 during a copy and reads the data after the copy ends. Both passed in the lab
-on 2026-11-21. The gateway's unit tests check each refusal.
+on 2026-11-27; stage 04b once failed there on a timing fault of the test's
+own read, and passed when run again. The gateway's unit tests check each
+refusal.
 
 ### Ending a migration with force
 
 When: a migration whose cutover has started cannot be finished: the new
 side's agent does not answer the proof, or a disk node of the leg is gone
-and the copy is not whole. When the old side's disk node is the one gone,
+and the copy is not whole; or it must end before its copy is whole. When the old side's disk node is the one gone,
 run `dnvctl migr finish --name <name>`, with no force, first. The gateway
 asks only the new side's disk node for the proof, so the finish goes
 through when the copy is whole. Once that disk node has lost its

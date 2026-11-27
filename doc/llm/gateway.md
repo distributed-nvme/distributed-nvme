@@ -1985,9 +1985,10 @@ also refuses a reply with a non-zero code.
 that does not answer leaves the answer the leg's record gives, so a dead
 leg's repair never waits on a silent primary (`architecture.md`, Repairs).
 Nor do a forced `CancelMigration`'s reads of the primary's report after a
-cutover: the read before its write leaves the reply's `loss` text saying
-that the report did not answer, and the wait after the write tries again
-a second later, up to its bound (`CancelMigration`).
+cutover: for a leg to be copied again, a read before its write that does
+not answer, or a pool with no primary to ask, leaves the reply's `loss`
+text saying that the report did not answer, and the wait after the write
+tries again a second later, up to its bound (`CancelMigration`).
 The agent-side `AgentReply.code` convention does not apply to `Get*Size`,
 `Get*Info` or `Get*Bm` beyond what their replies define: `ForceStartGroup`'s
 check reads the group's row whatever the reply's code, as `CreateRepair`
@@ -2011,14 +2012,16 @@ what keeps such a two-phase RPC exactly as safe as a one-STM RPC. A
 GW6 is presence-based, so an interleaved mutation it did not observe stays
 invisible to it. That is the
 AG4 half of the token-less cost `architecture.md`, Revision keys and the
-sync fan-out, accepts. The node deletes, `DeleteClone`, `FinishMigration`
-and `CancelMigration` are the exception: their agent call proves a fact of
-one object, so their deciding STM compares the ids it read, a node's
-cluster id, node id and revision, a clone's id, a pool's and a migration's
-ids, and for `CancelMigration` the migration's id and whether its cutover
-is pending, with the planning snapshot's whatever the token, and answers
-`ABORTED` when one moved (Disk nodes; `CancelMigration`; the call matrix
-below).
+sync fan-out, accepts. The node deletes, `DeleteClone` and
+`FinishMigration` are the exception: their agent call proves a fact of one
+object, so their deciding STM compares the ids it read, a node's cluster
+id, node id and revision, a clone's id, a pool's and a migration's ids,
+with the planning snapshot's whatever the token, and answers `ABORTED`
+when one moved (Disk nodes; the call matrix below). `CancelMigration`
+compares the migration's id and whether its cutover is pending the same
+way, whatever the token, though its read proves nothing: the read only
+words the reply, and the reply's words must fit what the write did
+(`CancelMigration`).
 
 The complete call matrix:
 
