@@ -2789,7 +2789,9 @@ give the rest. A pool's rows are:
   does not hold in sync has a row of its own; a group whose add the primary
   refuses; the operator in charge of a group's repair; a forced-start mark
   that stands, whose clear, a step of the worker's pass (`dnv-worker.md`
-  AR13), waits while the worker runs no pass for the pool;
+  AR13), waits while the worker runs no pass for the pool, and whose text,
+  over a running array the primary's reading names no start of the mark
+  for, says that it acts at the array's next stop (`cnagent.md` CN12);
 * an open repair, with its stage, what the primary's report says it waits
   for and who acts next: for a created one, the primary, then the worker's
   stage move (`dnv-worker.md` AR11), a step of the worker's pass, which
@@ -7537,8 +7539,10 @@ pass whole, since a member zeroed in a pass that then ends comes back blank
 and is added fresh; and the new identity
 keeps md from taking a leg of the old history back from the bitmap as in
 sync while it holds other data. The primary keeps in memory the mark
-whose forced start it ran, the acted mark, and reports it in the group's
-reading while its request carries that mark
+whose forced start it ran, the acted mark, but not one whose start kept
+the named leg's bad-block list because the stop between its two runs
+failed, and reports it in the group's reading while its request carries
+that mark
 (`cnagent.md` CN28). The sp worker clears the mark once the current
 primary's report, of an observation made at the mark's revision or later,
 reads the group's row `OK`, names the mark as the acted mark, and holds a

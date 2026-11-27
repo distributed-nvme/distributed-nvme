@@ -484,8 +484,14 @@ func (s *CnAgentServer) build(
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.
 			// CN12: the forced start that ran its assembly acted on the
-			// mark, whether or not the rest of the pass went through.
-			if gp.forcedRan {
+			// mark, whether or not the rest of the pass went through, but
+			// for one whose stop to drop the named leg's bad-block list
+			// failed, which is not done, whatever an earlier start of the
+			// same mark recorded.
+			switch {
+			case gp.forcedListKept:
+				delete(st.forcedStarts, gp.grpId)
+			case gp.forcedRan:
 				st.forcedStarts[gp.grpId] = gp.mark.GetRevision()
 			}
 			if err == nil {

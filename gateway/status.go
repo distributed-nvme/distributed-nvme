@@ -1382,7 +1382,7 @@ func (b *statusBuilder) groupRows(info *pb.CntlrInfo) {
 				})
 			}
 		}
-		b.markRows(grp, sliceId, cloneName, object)
+		b.markRows(grp, sliceId, cloneName, object, info)
 	})
 }
 
@@ -1391,14 +1391,21 @@ func (b *statusBuilder) etcdGroupRows() {
 	b.eachGroup(func(grp *pb.Group, sliceId uint64, cloneName string,
 		where string) {
 		b.markRows(grp, sliceId, cloneName,
-			fmt.Sprintf("group %d (%s)", grp.GetGrpId(), where))
+			fmt.Sprintf("group %d (%s)", grp.GetGrpId(), where), nil)
 	})
 }
 
 // markRows are a group's marks in etcd: the operator in charge of its
-// repair, and a forced start that stands.
+// repair, and a forced start that stands. info is the primary's report, nil
+// for a read with none: when its row of the group reads OK and its reading
+// names no acted mark of the mark's revision, the primary reports no
+// finished start of this mark, as after a mark written over a running
+// array, a start whose stop to drop the named leg's bad-block list failed,
+// or an agent restart that forgot the start, and the mark acts at the
+// array's next stop (cnagent.md CN12).
 func (b *statusBuilder) markRows(
 	grp *pb.Group, sliceId uint64, cloneName string, object string,
+	info *pb.CntlrInfo,
 ) {
 	if grp.GetOperatorInCharge() {
 		b.add(rankGroup, &pb.StatusRow{
@@ -1416,12 +1423,23 @@ func (b *statusBuilder) markRows(
 		if b.noPass {
 			when = "once it drives the pool again and"
 		}
+		text := fmt.Sprintf("a forced start from leg %d stands: the "+
+			"worker clears it %s the primary reports the array running "+
+			"from it", mark.GetLegId(), when)
+		grpId := grp.GetGrpId()
+		reading, haveReading := info.GetGrpIdToGrpInfo()[grpId]
+		if haveReading && info.GetGrpIdToMdRaid()[grpId].GetStatus() ==
+			pb.ResStatus_RES_STATUS_OK &&
+			reading.GetForcedStartRevision() != mark.GetRevision() {
+			text = fmt.Sprintf("a forced start from leg %d stands over "+
+				"a running array, and the primary reports no finished "+
+				"start of it: it acts at the array's next stop",
+				mark.GetLegId())
+		}
 		b.add(rankGroup, &pb.StatusRow{
-			Kind:   pb.StatusKind_STATUS_KIND_GROUP,
-			Object: object,
-			Text: fmt.Sprintf("a forced start from leg %d stands: the "+
-				"worker clears it %s the primary reports the array "+
-				"running from it", mark.GetLegId(), when),
+			Kind:    pb.StatusKind_STATUS_KIND_GROUP,
+			Object:  object,
+			Text:    text,
 			SliceId: sliceId,
 			GrpId:   grp.GetGrpId(),
 			LegId:   mark.GetLegId(),

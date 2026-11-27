@@ -1925,6 +1925,14 @@ func markLegRows(
 // the assembly that started it.
 const msgForcedStart = "forced start"
 
+// msgForcedStartListKept is the Warn record of a forced start whose stop
+// between its two runs failed (forcedAssemble, CN12): the array runs from
+// the named leg with the leg's bad-block list, the start is not done, and
+// the mark acts again at the array's next stop. It names the group, the leg
+// and the stop's error, so the operator can tell this case from a mark
+// written over a running array.
+const msgForcedStartListKept = "forced start kept the list"
+
 // msgForcedStartRefused is the Warn record of a forced start refused for
 // refusals the mark does not pass (CN12): it names the group, the leg, each
 // such refusal whole, its kind's word first, and the words of the kinds the
@@ -2736,7 +2744,9 @@ func (s *CnAgentServer) forcedAssemble(
 	// at its timeout, or a read after it that fails, can leave the array
 	// started with an error, and while the mark stands no other step brings
 	// the group's array up on this node (ensureGroup), so an array that runs
-	// then is this start's (cnagent.md CN12, CN28).
+	// then is this start's (cnagent.md CN12, CN28). One exception: a stop
+	// between the runs that fails leaves the array running with the named
+	// leg's bad-block list, a start that is not done (grpPlan.forcedListKept).
 	gp.forcedRan = true
 	first := s.md.AssembleForced(ctx, gp.devPath, gp.mdArrayName,
 		named.path, mdUpdateUuid)
@@ -2752,6 +2762,12 @@ func (s *CnAgentServer) forcedAssemble(
 			return mdUpdateUuid, nil
 		}
 		if err := s.stopStartedArray(ctx, plan, gp, walk); err != nil {
+			gp.forcedListKept = true
+			slog.WarnContext(ctx, msgForcedStartListKept,
+				append(s.cntlrIdAttrs(plan),
+					slog.Uint64("grp_id", gp.grpId),
+					slog.Uint64("leg_id", named.legId),
+					slog.String("error", err.Error()))...)
 			return "", fmt.Errorf("forced start: the array started from "+
 				"leg %#x under its new identity keeps the leg's bad-block "+
 				"list, and its stop to drop the list failed: %w",

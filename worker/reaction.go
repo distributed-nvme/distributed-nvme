@@ -4889,7 +4889,8 @@ func (w *spWorker) clearGrpForcedStart(
 // died, it moves a broken array between states, so a report from that
 // window looks like a running array, and only the primary knows whether
 // its forced start ran. A mark the primary never acted on, as one written
-// over an array that runs or one whose start an agent restart forgot,
+// over an array that runs, one whose start kept the named leg's bad-block
+// list because its stop failed, or one whose start an agent restart forgot,
 // stays until the operator withdraws it: while it stands the worker
 // creates no repair of the group (AR8), and at the array's next stop the
 // primary acts on it, refusing a named leg older than a member it would

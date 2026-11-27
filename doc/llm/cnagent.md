@@ -2583,7 +2583,10 @@ dm-clone (CN18).
      a first run that failed and left the identity as it was is the
      group's error, and the next pass runs the first run again; a stop between the two runs that
      fails is the group's error, the array running under its new identity
-     with the list (Known limits). Reason for the identity: a leg of the
+     with the list, and that start is not done: a Warn record names the
+     group, the named leg and the stop's error, and the converge drops the
+     group's acted mark (CN28), so the mark stands and acts at the array's
+     next stop (Known limits). Reason for the identity: a leg of the
      old history added later is then copied whole, never re-added from the
      bitmap, which would leave the array serving two histories at once
      (`cnagent_integtest.md`, Lab facts). Reason for the drop: a list the
@@ -2607,7 +2610,8 @@ dm-clone (CN18).
   The agent never clears the mark: the worker clears it from the primary's
   report once the row reads `OK` with a member in sync on a leg whose own
   row reads `OK` and the group's reading names the mark as the acted mark,
-  the one whose forced start this agent process ran (CN28;
+  the one whose forced start this agent process ran, a start whose stop
+  between its two runs failed excepted (CN28;
   `dnv-worker.md` AR13), and until then a pass that finds the
   array not running starts it again from the same leg. A pass whose
   forced start ends in an error — a wait for a member that is not
@@ -6240,7 +6244,10 @@ mark of that revision, zero otherwise, which the worker's clear asks for
 (`dnv-worker.md` AR13). The agent keeps the acted mark in memory alone: a
 forced start sets it once it runs its assembly, whatever comes of the
 runs, since while the mark stands no other step brings the group's array
-up on the node, so an array that runs then is that start's; every
+up on the node, so an array that runs then is that start's, but a start
+whose stop between its two runs fails drops it, an entry of an earlier
+start of the same mark too, since that start kept the named leg's
+bad-block list and is not done (CN12, the forced start); every
 converge drops it once the request's mark is gone or carries another
 revision, and a restart forgets it. The read and the converge name it
 alike. The repair
@@ -7123,7 +7130,9 @@ stores instead is CN23's.
   or the array stops: the worker clears only a mark the group's reading
   names as the acted mark (CN28; `dnv-worker.md` AR13), which the agent
   keeps in memory alone, so a mark whose start an agent restart forgot
-  stays, and so does a mark written over an array that runs, which the
+  stays, so does a mark whose start's stop between its two runs failed,
+  which the agent does not name as acted (below), and so does a mark
+  written over an array that runs, which the
   gateway lets through when the report it reads shows the group's row
   other than `OK` (`architecture.md`, Repairs, `ForceStartGroup`), as
   while md, retrying a copy whose only source is dead, shows the array
@@ -7182,33 +7191,31 @@ stores instead is CN23's.
 * A stop between the two runs of a forced assembly that fails leaves the
   array running from the named leg under its new identity with the leg's
   bad-block list (CN12, the forced start): the pass ends in the group's
-  error, and the next converge, which a read's name of the members the
-  array lacks brings (CN30), finds the array running and leaves the mark
-  waiting, and its member reconciliation adds the zeroed members, onto
-  which md copies the listed regions as bad, as no member in sync can be
-  read there; a host's read over such a region fails, though the named
-  leg holds its bytes. Four ways are tried in the cn suite, each from that
-  state (`cnagent_integtest.md`, Cases, repair). The mark kept, the
-  level stepped to the one that stops the group arrays and back: the
-  standing mark acts again, as no array of the group runs, the stop
-  between its two runs goes through, and its second run drops the list;
-  but the worker clears a mark once its report reads the
-  start done (`dnv-worker.md` AR13), which it does once the group's row
-  reads OK again after the converge that adds the other members. The mark
-  cleared, the same level steps: the plain assembly starts the array from
-  every member with its list and the row reads OK, over which the gateway
-  refuses a new mark, as it does at the level that stops the group arrays
-  (`architecture.md`, Repairs, ForceStartGroup). A new mark given while the
-  row reads ERROR, the one state of this sequence in which the gateway
-  takes one, as it takes one over any row but OK, then the level steps: the
-  mark waits over the running array, the reading names no mark of its revision
-  acted, so the worker keeps it, and it acts at the step up and drops the
-  list; that state lasts only until the next converge, which the worker's
-  re-send on the failed start's reply code brings. By hand, mdadm's own
-  assembly passing force-no-bbl at the level that stops the group arrays, then
-  its stop, drops every member's list; a region md never copied onto a member
-  added under the list is then read as good whatever that member holds there.
-  The operator's choices from that state, and what each costs, are
+  error and drops the acted mark (CN28), so the worker keeps the mark
+  (`dnv-worker.md` AR13), and the next converge, which a read's name of
+  the members the array lacks brings (CN30), finds the array running and
+  leaves the mark waiting, and its member reconciliation adds the zeroed
+  members, onto which md copies the listed regions as bad, as no member in
+  sync can be read there; a host's read over such a region fails, though
+  the named leg holds its bytes. The way back is the level stepped to the
+  one that stops the group arrays and back: the standing mark acts again,
+  as no array of the group runs, the stop between its two runs goes
+  through, and its second run drops the list. Until then the mark costs
+  what any mark over a running array costs (above): leg repair holds the
+  group, and a failover acts on it from the named leg on the new primary.
+  Four stages of the cn suite start from that state
+  (`cnagent_integtest.md`, Cases, repair): the mark kept and the level
+  steps, which drop the list; the mark cancelled and the same steps, where
+  the plain assembly starts the array from every member with its list and
+  the row reads OK, over which the gateway refuses a new mark, as it does
+  at the level that stops the group arrays (`architecture.md`, Repairs,
+  ForceStartGroup); a new mark given while the row reads ERROR, the one
+  state of this sequence in which the gateway takes one, which waits over
+  the running array and acts at the step up; and, with the mark cancelled,
+  mdadm's own assembly passing force-no-bbl at the level that stops the
+  group arrays, then its stop, which drops every member's list, a region md
+  never copied onto a member added under the list then read as good
+  whatever that member holds there. The operator's steps are
   `operations.md`, A forced start whose stop failed.
 * After a forced start, a group whose `leg_list` legs that decide its
   assembly carry two identities stays down at its next assembly (CN12, case

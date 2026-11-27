@@ -24,6 +24,16 @@ func withForcedMark(
 	return req
 }
 
+// forcedMarkOf is markOf with the force of withForcedMark.
+func forcedMarkOf(
+	req *pb.SyncupCntlrRequest,
+	legId, revision uint64,
+) *pb.SyncupCntlrRequest {
+	req = markOf(req, legId, revision)
+	dataGrpOf(req).ForcedStart.Force = true
+	return req
+}
+
 // withRepairForce sets the operator's force on the request's repair.
 func withRepairForce(req *pb.SyncupCntlrRequest) *pb.SyncupCntlrRequest {
 	req.NameToRepair[repName].Force = true
@@ -234,22 +244,92 @@ func TestForcedStartDropsABadBlockList(t *testing.T) {
 		f.node.failCmdAlways["cmd mdadm --stop "] =
 			"mdadm: Cannot get exclusive access"
 		f.node.mu.Unlock()
+		logs := captureLogs(t)
 		info := f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
 		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
 			"its stop to drop the list failed", "grp data")
+		recs := logs.msgRecords(t, msgForcedStartListKept)
+		if len(recs) != 1 || recs[0]["level"] != "WARN" ||
+			recs[0]["grp_id"] != float64(testDataGrp) ||
+			recs[0]["leg_id"] != float64(testDataLeg2) {
+			t.Fatalf("the %q records are %v, want one naming the group "+
+				"and leg 2", msgForcedStartListKept, recs)
+		}
 		assertNoCall(t, f.node, "--update="+mdUpdateForceNoBbl)
-		// The first run started the array, so the mark was acted on though
-		// the pass ended in an error: the next converge finds the array
-		// running, leaves the mark waiting and names it as acted
-		// (cnagent.md CN28), for the worker's clear.
+		// The first run started the array with the named leg's list, and
+		// the stop that would drop the list failed: the start is not done,
+		// so the next converge finds the array running, leaves the mark
+		// waiting and names no acted mark (cnagent.md CN12, CN28), and the
+		// worker keeps the mark.
 		f.node.mu.Lock()
 		delete(f.node.failCmdAlways, "cmd mdadm --stop ")
 		f.node.mu.Unlock()
-		info = f.syncup(t, markOf(quietReq(5), testDataLeg2, 4))
+		info = f.syncup(t, forcedMarkOf(quietReq(5), testDataLeg2, 4))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("the converge after the failed stop reads acted mark "+
+				"%d, want none", got)
+		}
+		if read, _ := f.read(t, 5); actedRevision(read) != 0 {
+			t.Fatalf("the read after the failed stop reads acted mark %d, "+
+				"want none", actedRevision(read))
+		}
+		// The operator's way back: the level step down stops the array,
+		// and the step up acts on the standing mark again, whose stop now
+		// goes through and whose second run drops the list.
+		f.syncup(t, forcedMarkOf(levelReq(6, pb.SpLevel_SP_LEVEL_NO_REDUND),
+			testDataLeg2, 4))
+		if !f.node.arrayGone(f.mdDev) {
+			t.Fatalf("the level step down left the array")
+		}
+		f.node.Reset()
+		f.syncup(t, forcedMarkOf(quietReq(7), testDataLeg2, 4))
+		if calls := f.node.callsMatching(
+			"--update=" + mdUpdateForceNoBbl); len(calls) != 1 {
+			t.Fatalf("the start after the level step: %v, want one run "+
+				"that drops the list", calls)
+		}
+		info = f.syncup(t, forcedMarkOf(quietReq(8), testDataLeg2, 4))
 		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 		if got := actedRevision(info); got != 4 {
-			t.Fatalf("the converge after the failed stop reads acted mark "+
+			t.Fatalf("the converge after the level step reads acted mark "+
 				"%d, want 4", got)
+		}
+	})
+	t.Run("a second start's stop fails", func(t *testing.T) {
+		// A mark acted on stands, as until the worker's clear; the level
+		// steps down, the list is back on the named leg, and the start the
+		// step up brings fails its stop: that start is not done, though
+		// an earlier one of the same mark was, so the reading names no
+		// acted mark.
+		f := downNoRepair(t)
+		f.node.setSuperblock(f.leg2, fakeSuperblock{badBlocks: 2})
+		f.syncup(t, withForcedMark(quietReq(4), testDataLeg2))
+		info := f.syncup(t, forcedMarkOf(quietReq(5), testDataLeg2, 4))
+		if got := actedRevision(info); got != 4 {
+			t.Fatalf("the first start reads acted mark %d, want 4", got)
+		}
+		f.syncup(t, forcedMarkOf(levelReq(6, pb.SpLevel_SP_LEVEL_NO_REDUND),
+			testDataLeg2, 4))
+		if !f.node.arrayGone(f.mdDev) {
+			t.Fatalf("the level step down left the array")
+		}
+		f.node.setSuperblock(f.leg2, fakeSuperblock{badBlocks: 2})
+		f.node.mu.Lock()
+		f.node.failCmdAlways["cmd mdadm --stop "] =
+			"mdadm: Cannot get exclusive access"
+		f.node.mu.Unlock()
+		info = f.syncup(t, forcedMarkOf(quietReq(7), testDataLeg2, 4))
+		assertErrorDetails(t, info.GetGrpIdToMdRaid()[testDataGrp],
+			"its stop to drop the list failed", "grp data")
+		f.node.mu.Lock()
+		delete(f.node.failCmdAlways, "cmd mdadm --stop ")
+		f.node.mu.Unlock()
+		info = f.syncup(t, forcedMarkOf(quietReq(8), testDataLeg2, 4))
+		assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
+		if got := actedRevision(info); got != 0 {
+			t.Fatalf("the converge after the second start's failed stop "+
+				"reads acted mark %d, want none", got)
 		}
 	})
 }

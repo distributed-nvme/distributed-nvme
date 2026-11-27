@@ -5335,9 +5335,11 @@ the levels where reactions stop. Reason for the acted mark: while md
 retries a copy whose only source died, it moves a broken array between
 states, so a report from that window looks like a running array, and only
 the primary knows whether its forced start ran. A mark the primary does
-not report as acted on — one written over an array that runs, or one whose
-start an agent restart forgot, since the primary keeps the acted mark in
-memory alone — stays until the operator withdraws it or the array's next stop
+not report as acted on — one written over an array that runs, one whose
+start kept the named leg's bad-block list because the stop between its two
+runs failed (`cnagent.md` CN12), or one whose start an agent restart
+forgot, since the primary keeps the acted mark in memory alone — stays
+until the operator withdraws it or the array's next stop
 (`architecture.md`, Known limits): while it stands leg repair holds the
 group (AR8), and at the array's next stop the primary acts on it,
 refusing a named leg older than a member it would zero unless the mark

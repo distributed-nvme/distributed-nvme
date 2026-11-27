@@ -910,7 +910,7 @@ func TestStatusForcedStartWithNoWorker(t *testing.T) {
 	fake.setInfo(nil, nil, nil, &pb.CntlrInfo{
 		GrpIdToMdRaid: map[uint64]*pb.ResInfo{stDataGrp: stOkRow()},
 		GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
-			stDataGrp: {Whole: true},
+			stDataGrp: {Whole: true, ForcedStartRevision: 3},
 		},
 	})
 	env.put(pool)
@@ -920,6 +920,57 @@ func TestStatusForcedStartWithNoWorker(t *testing.T) {
 	stOne(t, rows, pb.StatusKind_STATUS_KIND_LOST_RECORD,
 		"the absent revision key", "revision key",
 		"no step the pool's other rows name runs")
+}
+
+// TestStatusForcedStartOverARunningArray pins the forced-start mark's text
+// against the primary's report (cnagent.md CN12; dnv-worker.md AR13): over a
+// running array whose reading names the mark as acted, the plain text; over
+// a running array whose reading names no acted mark of its revision, as
+// after a start whose stop failed, the text that the mark acts at the
+// array's next stop; over a group row that does not read OK, the plain text;
+// with no reading of the group, the plain text.
+func TestStatusForcedStartOverARunningArray(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		row   *pb.ResInfo
+		acted uint64
+		want  string
+		not   string
+	}{
+		{"acted", stOkRow(), 3, "stands: the worker clears it once", "next stop"},
+		{"not acted", stOkRow(), 0, "acts at the array's next stop", ""},
+		{"acted another", stOkRow(), 2, "acts at the array's next stop", ""},
+		{"row error", &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR,
+			Details: "its stop to drop the list failed"}, 0,
+			"stands: the worker clears it once", "next stop"},
+		{"no reading", stOkRow(), 0, "stands: the worker clears it once",
+			"next stop"},
+	} {
+		t.Run(tc.label, func(t *testing.T) {
+			env := newStEnv(t)
+			cn, fake := env.addCn("cn")
+			pool := env.newPool("p0", cn, stDns(env))
+			pool.slices[stSlice].DataGrpList[0].ForcedStart =
+				&pb.ForcedStart{LegId: stLeg, Revision: 3}
+			info := &pb.CntlrInfo{
+				GrpIdToMdRaid: map[uint64]*pb.ResInfo{stDataGrp: tc.row},
+				GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
+					stDataGrp: {Whole: true, ForcedStartRevision: tc.acted},
+				},
+			}
+			if tc.label == "no reading" {
+				info.GrpIdToGrpInfo = nil
+			}
+			fake.setInfo(nil, nil, nil, info)
+			env.put(pool)
+			rows := stRowsOf(env.status(0, ""), "p0")
+			row := stOne(t, rows, pb.StatusKind_STATUS_KIND_GROUP,
+				tc.label, "forced start from leg", tc.want)
+			if tc.not != "" && strings.Contains(row.GetText(), tc.not) {
+				t.Errorf("row %q: want no %q", row.GetText(), tc.not)
+			}
+		})
+	}
 }
 
 // TestStatusMigration pins the migration rows: one whose cutover is

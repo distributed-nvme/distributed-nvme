@@ -920,15 +920,16 @@ bad-blocks starts the array under a new identity, whose stop the suite's
 mdadm makes md refuse (Topology): the row names the failed stop, the array
 runs with the list, and the re-send adds the other leg, which md gives a
 copy of the list, as the region it cannot read from the named leg is bad
-on every member in sync. In the first stage
-the level that serves the host comes back with both lists kept and the
-host's read of its first MiB fails; then the mark, kept, with the level
+on every member in sync. In the first stage the re-send's reading names no
+acted mark while the row reads OK, so the worker would keep the mark
+(`cnagent.md` CN12); the level that serves the host comes back with both
+lists kept and the host's read of its first MiB fails; then the mark, kept, with the level
 stepped down to the one that stops group arrays and back, acts again once
 no array runs, the record of a new forced start naming leg 1 and both runs,
-and drops both lists. In the second the mark is cleared as the worker
-clears it, once the reading names it acted and the row reads OK; the same
-level steps assemble the array again from both legs, whose lists stay, the
-row OK. In the third a new mark is given while the row reads ERROR, the one
+and drops both lists. In the second the reading again names no acted
+mark while the row reads OK, and the mark is cleared as an operator's
+cancel clears it; the same level steps assemble the array again from both
+legs, whose lists stay, the row OK. In the third a new mark is given while the row reads ERROR, the one
 state of this sequence in which the gateway takes a new mark, as it refuses
 one over a row that reads OK and at the level that stops the group arrays
 (`architecture.md`, Repairs, ForceStartGroup); the array runs, so the mark

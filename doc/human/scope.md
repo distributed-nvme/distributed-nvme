@@ -722,26 +722,19 @@ The entries:
   stops it at once, and starts it again with the list dropped. If that stop
   fails, the array runs with the list, and the legs added to it copy the
   list's regions as bad too. Hosts then get IO errors over those regions,
-  though the named leg holds their data. State: procedure written,
+  though the named leg holds their data. The primary does not report such
+  a start as done, so the worker keeps the forced-start mark, and the
+  status read's line for the mark says that it acts at the array's next
+  stop. State: procedure written,
   [A forced start whose stop failed](operations.md#a-forced-start-whose-stop-failed):
-  leave the group as it is, with IO errors over the listed regions alone,
-  or drop the lists by hand with mdadm at the cost it names. Fix decided:
-  the mark will stay after such a start. Forty such stops in the lab
-  never failed. A suite case makes one fail on purpose and tries four ways
-  from it.
-  With the mark still standing, the pool turned down to the level that
-  stops the arrays and back up: the forced start runs again and drops the
-  list. But the worker clears the mark soon after such a start. With the
-  mark cleared, the same steps keep the list, and dnv then refuses a new
-  mark. A new mark given right after the failed stop, while the group
-  reads as an error, is the one dnv takes; it waits, and the same steps
-  then drop the list. That moment ends with the worker's next request to
-  the node, which the failed stop's reply makes it send. By hand, at the
-  level that stops the arrays, mdadm can start the array with an option
-  that drops every leg's list, then stop it. That drops the list too, but
-  then the places md never copied onto a leg added under the list read as
-  good data, whatever that leg holds there. So a way back that loses
-  nothing needs a way to keep or give the mark first.
+  with the mark standing, turn the pool down to the level that stops the
+  arrays and back up; the forced start then runs again and drops the
+  list, and nothing is lost. Until then the worker repairs no leg of the
+  group, and a failover makes the new primary run the forced start by
+  itself, from the named leg. A mark cancelled instead keeps the lists,
+  and dnv then refuses a new mark. Forty such stops in the lab never
+  failed. A suite case makes one fail on purpose: the primary does not
+  report the start as done, and the level steps drop the list.
 - **A forced-start mark cleared during a change of the pool's owner.**
   Silent. A pool's owner is the worker that drives it. At an owner change
   the new owner sends a request that drops the mark. If the controller

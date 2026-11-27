@@ -547,7 +547,10 @@ Safe steps:
    reads the row missing. The primary's cn agent logs each such try as the
    record `forced start refused`. Follow step 2. To go on past what it
    lists, write the mark again with those words, as in step 3: a new mark
-   replaces the one that stands.
+   replaces the one that stands. If the mark stays while the group's row
+   reads ok, and the primary's cn agent logged the record
+   `forced start kept the list` for the group, the start's stop failed:
+   follow "A forced start whose stop failed".
 5. Read the group again. md is copying onto the other legs. Wait until
    every leg is in sync. Check that no leg shows a bad-block list. If the
    named leg's list is still there after a start that passed `bad-blocks`,
@@ -784,9 +787,10 @@ Causes and steps:
   `dnvctl group force-start --grp <group id> --cancel`. Left standing, the
   mark acts at the array's next stop, from a leg that may be stale by
   then. The worker also makes no leg repair of the group while it stands.
-  After a forced start whose stop failed, read "A forced start whose stop
-  failed" first: there a mark whose leg md holds in sync can drop the
-  bad-block lists.
+  If the primary's cn agent logged the record `forced start kept the list`
+  for the group since the mark was written, the start's stop failed: do
+  not cancel, and follow "A forced start whose stop failed", where the
+  standing mark drops the lists.
 - The named leg does not serve. The start waits for it. Bring the leg
   back, as in [A group whose in-sync leg died during a
   copy](#a-group-whose-in-sync-leg-died-during-a-copy).
@@ -839,135 +843,63 @@ not over the list's regions, which no member can read; those legs get the
 regions in their own lists, and the row then reads ok. Hosts get IO errors
 over the listed regions, though the named leg holds their data.
 
-Confirm: `dnvctl group inspect --grp <group id>` shows a bad-block list on
-the named leg and, once md has copied onto them, on the other legs.
-`dnvctl cluster get-status` lists a `group` line for the bad blocks.
+Confirm: the primary's cn agent logged the record
+`forced start kept the list`, naming the group, the named leg and the
+stop's error. `dnvctl group inspect --grp <group id>` shows a bad-block
+list on the named leg and, once md has copied onto them, on the other legs.
+`dnvctl cluster get-status` lists a `group` line for the bad blocks, and a
+`group` line that says the forced start from the named leg stands over a
+running array and acts at the array's next stop.
 
-What dnv does alone: nothing that drops the lists. The worker sends the
-primary its request again at the next check round, which adds the other
-legs. It clears the mark once the row reads ok and the primary reports
-that it acted on the mark. A primary whose agent restarted since the start
-reports no such thing, and the mark then stands: it acts again at the
-array's next stop. The worker makes no leg repair of the group, since
-every leg now lists bad blocks, and a repair for bad blocks needs a leg
-with none. From `NO_THINPOOL` down no reaction runs at all.
+What dnv does alone: the primary does not report such a start as done, so
+the worker keeps the mark. While the mark stands, the worker makes no leg
+repair of the group. Anything that stops the array makes the primary run
+the forced start again from the named leg: the level step below, and also
+a failover, after which the new primary runs it. A start whose stop goes
+through drops the list. From `NO_THINPOOL` down no reaction runs at all.
 
-The ways, and what each costs:
+Steps:
 
-1. Leave the group as it is, and go on from step 6 of "Which leg to
-   choose", which steps the level back. Every region outside the lists
-   reads and writes as before; a read over a listed region fails. Nothing
-   more is lost. If `dnvctl sp get` (`dnvctl clone get --name <clone>` for
-   a clone's group) still shows a `forced_start` on the group a few check
-   rounds after the row reads ok, act on the mark. Either follow way 3 now:
-   with the mark standing, it leads to "When the mark still stands", where
-   the mark drops every list with nothing lost while md holds its leg in
-   sync. Or cancel the mark, as "A forced start that waits" says: left
-   standing, it acts at the array's next stop, from a leg that may be
-   stale by then. Once the mark is gone, way 3 keeps only its four steps,
-   at the cost they carry.
-2. A new mark that names the same leg and passes `bad-blocks`, given while
-   the row still reads error, then the level stepped to `NO_REDUND` and
-   back, drops every list and loses nothing: the second start wipes the
-   added legs again, and md copies them whole. But
-   that moment ends with the worker's next request, one check round after
-   the failed stop, 2 seconds at the default: no person can act in it.
-   Once the row reads ok, the gateway refuses a new mark, and it refuses
-   one at `NO_REDUND` too.
-3. By hand with mdadm, which drops every leg's list. Before you start,
-   with the level at `NO_THINPOOL`
-   (`dnvctl sp set-level --level NO_THINPOOL` when it is not):
-   - Read the group's md device, `res_name` of its row under
-     `cntlr_info.grp_id_to_md_raid` in
-     `dnvctl cntlr inspect --id <primary cntlr id>`. As root on the
-     primary's controller node, `readlink -f <md device>` prints the
-     array's kernel name, such as `/dev/md126`. Check that name once:
-     `cat /sys/block/md126/md/array_state`, with the kernel name you read,
-     must print a state of a running array: `clean`, `active`,
-     `active-idle`, `write-pending`, `readonly` or `read-auto`. If it fails
-     or prints another word, stop and ask for help.
-   - Read the device of each leg md holds in the array: the legs of
-     `leg_list` in `dnvctl group inspect --grp <group id>` whose
-     `member.md_state` is not empty. A leg's device is
-     `/dev/mapper/<res_name>` of its row under `cntlr_info.leg_id_to_leg`.
-   - Check that `dnvctl sp get` (`dnvctl clone get --name <clone>` for a
-     clone's group) shows no `forced_start` on the group. If it shows one,
-     run no mdadm: follow "When the mark still stands" below in place of
-     the four steps.
+1. Check the mark and the named leg. `dnvctl sp get` (`dnvctl clone get
+   --name <clone>` for a clone's group) must show a `forced_start` on the
+   group. `dnvctl group inspect --grp <group id>` must show, for the leg
+   the mark names, a `member.md_state` that holds the word `in_sync` and
+   not the word `faulty`. Read the group's md device too: `res_name` of
+   its row under `cntlr_info.grp_id_to_md_raid` in
+   `dnvctl cntlr inspect --id <primary cntlr id>`; as root on the
+   primary's controller node, `readlink -f <md device>` prints the array's
+   kernel name, such as `/dev/md126`.
+2. Step the level to `NO_REDUND`:
+   `dnvctl sp set-level --level NO_REDUND`. Wait until the primary has
+   stopped the array: `dnvctl cntlr inspect --id <primary cntlr id>` shows
+   `applied_revision` at least the `sp_rev.revision` of `dnvctl sp get`,
+   and on the primary's controller node
+   `cat /sys/block/md126/md/array_state`, with the kernel name you read,
+   prints `clear` or fails with `No such file or directory`. Then step the
+   level back: `dnvctl sp set-level --level NO_THINPOOL`. The mark acts:
+   the start wipes the other legs, drops the named leg's list, and md
+   copies the other legs whole. Wait until every leg is in sync and no leg
+   shows a bad-block list, as in step 5 of "Which leg to choose", then go
+   on from step 6 of "Which leg to choose".
 
-   The four steps:
-   1. Step the level to `NO_REDUND`:
-      `dnvctl sp set-level --level NO_REDUND`.
-   2. Wait until the primary has stopped the array:
-      `dnvctl cntlr inspect --id <primary cntlr id>` shows
-      `applied_revision` at least the `sp_rev.revision` of `dnvctl sp get`,
-      and on the primary's controller node
-      `cat /sys/block/md126/md/array_state`, with the kernel name you read,
-      prints `clear` or fails with `No such file or directory`. If the
-      array still runs a minute later, its stop failed again: stop and ask
-      for help.
-   3. As root on the primary's controller node, in one command line, so
-      that the array stops at once:
-      `mdadm --assemble <md device> --metadata=1.2 --update=force-no-bbl <the device of each leg>; mdadm --stop <md device>`.
-   4. Step the level back: `dnvctl sp set-level --level NO_THINPOOL`. The
-      primary assembles the array again, with no list.
-      `dnvctl group inspect --grp <group id>` must show no list on any leg.
-      If a list is still there, stop and ask for help. Otherwise go on from
-      step 6 of "Which leg to choose".
+Steps that can lose data: none of these. A cancel of the mark loses
+nothing either, but it keeps the lists: the level steps then start the
+array from every leg with its list, and dnv refuses a new mark once the
+row reads ok.
 
-   When the mark still stands: the worker has not cleared it yet, or the
-   primary's agent restarted after the start and forgot that it acted on
-   the mark, and then the worker never clears it. The mark acts again at
-   the array's next stop, and that drops every list with nothing lost, but
-   only while md still holds the mark's leg in sync:
-   1. Check that `dnvctl group inspect --grp <group id>` shows, for the leg
-      the mark names, a `member.md_state` that holds the word `in_sync` and
-      not the word `faulty`. If it does not, md no longer counts that leg
-      whole, and the other legs may hold newer data: cancel the mark with
-      `dnvctl group force-start --grp <group id> --cancel`, then stop and
-      ask for help.
-   2. Step the level to `NO_REDUND`, wait as in step 2 of the four steps,
-      and step the level back to `NO_THINPOOL`. The mark acts: the start
-      wipes the added legs, and md copies them whole.
-   3. Wait until every leg is in sync and no leg shows a bad-block list, as
-      in step 5 of "Which leg to choose". If the lists are still there, the
-      worker cleared the mark first, or the start's stop failed again:
-      start way 3 again. Otherwise go on from step 6 of "Which leg to
-      choose". Run none of the four steps.
-
-   The cost of the four steps: md then reads the listed regions from any
-   leg as good data. The named leg holds their data. A leg added after the
-   failed stop holds there whatever its disk held, since the forced start
-   wipes only a leg's md superblock and md copied nothing onto those
-   regions: for a leg that was a member of this group before, the group's
-   data as md last wrote it there, which can be older; for a repair's new
-   leg, whose disk node zeroed only its first blocks, possibly another
-   pool's bytes. Hosts can read those bytes, with no error.
-
-Steps that can lose data: the four steps of way 3, as their cost says.
-
-When to stop: before the four steps of way 3, unless you know what each
-added leg holds over the listed regions, as from its history in the group;
-when the kernel name you read does not show a running array before you
-start; when a mark still stands and md does not hold its leg in sync;
-when the array still runs at `NO_REDUND`, since its stop failed again; or
-when a leg still shows a bad-block list after step 4 of the four steps.
-Ask for help.
+When to stop: the mark no longer stands, or md does not hold the named leg
+in sync (then the other legs may hold newer data); the array still runs a
+minute after the step to `NO_REDUND`, since its stop failed again; or a
+leg still shows a bad-block list after the step back. Ask for help.
 
 Tested: the cn agent suite, repair case, stages `badstop` (the failed stop
-made on purpose; a host read over the lists fails; the mark kept and the
-level stepped down and up drops the lists), `badclear` (the mark cleared:
-the same steps keep both lists), `badwindow` (a new mark while the row
-reads error, then the level steps: both lists dropped) and `badmdadm` (the
-mdadm steps of way 3, with the stop at `NO_REDUND` read from the cn
-agent's check round, which reports the array as a leftover until it stops,
-and the host's data read back), at the agent level. The suite plays the
-worker and the gateway, so it times none of these against a worker. It
-passed in the lab on 2026-11-21. Not tested: the wait of step 2 of the
-four steps, through dnvctl and sysfs; the check of the kernel name; the
-check that md holds the mark's leg in sync; a mark that an agent restart
-left standing; and the four steps over a leg that holds another pool's
-bytes.
+made on purpose; the primary does not report the start as done; a host
+read over the lists fails; the mark kept and the level stepped down and up
+drops the lists) and `badclear` (the mark cancelled: the same steps keep
+both lists), at the agent level. The suite plays the worker and the
+gateway, so it times none of these against a worker. Not tested: the wait
+of step 2, through dnvctl and sysfs; the check of the named leg's state;
+and a failover that runs the forced start again.
 
 ### A lost clone meta group
 

@@ -9782,8 +9782,8 @@ repair_forced_start() {
 	# its own before it runs the stop once its flag stands (md_hold_arm), and
 	# md refuses a stop of an array that is open. Then each way back is tried
 	# from that same state, one a stage, and what each does is asserted: the
-	# mark kept, the level stepped down and up (here); the mark cleared as
-	# the worker clears it, the level stepped down and up (badclear); a new
+	# mark kept, the level stepped down and up (here); the mark cancelled as
+	# the operator cancels it, the level stepped down and up (badclear); a new
 	# mark while the row reads ERROR, then the level stepped down and up
 	# (badwindow); mdadm's own drop of both lists at the level with no group
 	# array (badmdadm). A way that drops the lists by a forced start drops
@@ -9794,9 +9794,14 @@ repair_forced_start() {
 	badstop_keep "way 1"
 	# The re-send the worker makes on the row's code: the array runs, so the
 	# standing mark does not act, and the converge adds Z, which the start
-	# zeroed, and md copies onto Z the regions O holds bad as bad.
+	# zeroed, and md copies onto Z the regions O holds bad as bad. The start
+	# whose stop failed is not done, so the reading names no acted mark and
+	# the worker keeps the mark (cnagent.md CN12; dnv-worker.md AR13).
 	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
 	badstop_added "way 1"
+	badstop_mark_check "way 1, the re-send"
+	[ "$BS_ROW" = RES_STATUS_OK ] && [ "$BS_ACTED" = 0 ] ||
+		die "repair badstop: way 1: the worker would clear the mark of a start whose stop failed (acted $BS_ACTED, mark $BS_MARK, row $BS_ROW)"
 	# What a host read meets over the kept lists, at the level that serves
 	# the host with the mark still standing.
 	badstop_level READWRITE "way 1: the level that serves the host, both lists kept"
@@ -9817,19 +9822,19 @@ repair_forced_start() {
 		die "repair badstop: way 1: the standing mark did not start the array again from the named leg"
 	badstop_swap
 
-	stage badclear "way 2 outside the window: the mark cleared as the worker clears it, the level stepped down and up, keeps both lists"
+	stage badclear "the mark cancelled by the operator, the level stepped down and up, keeps both lists"
 	# Once the re-send has added the other leg the row reads OK and the
-	# reading names the standing mark as acted, so the worker clears it;
-	# with no mark the level
-	# step assembles the array again from both members, whose lists stay,
-	# and the row reads OK, over which the gateway takes no new mark
-	# (architecture.md, Repairs, ForceStartGroup).
+	# reading names no acted mark, so the worker keeps the mark; the
+	# operator cancels it, and with no mark the level step assembles the
+	# array again from both members, whose lists stay, and the row reads
+	# OK, over which the gateway takes no new mark (architecture.md,
+	# Repairs, ForceStartGroup).
 	badstop_keep "way 2 outside the window"
 	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
 	badstop_added "way 2 outside the window"
 	badstop_mark_check "way 2 outside the window, the re-send"
-	[ "$BS_ROW" = RES_STATUS_OK ] && [ "$BS_ACTED" = "$BS_MARK" ] ||
-		die "repair badstop: way 2 outside the window: the worker would not clear the mark (acted $BS_ACTED, mark $BS_MARK, row $BS_ROW)"
+	[ "$BS_ROW" = RES_STATUS_OK ] && [ "$BS_ACTED" = 0 ] ||
+		die "repair badstop: way 2 outside the window: the worker would clear the mark of a start whose stop failed (acted $BS_ACTED, mark $BS_MARK, row $BS_ROW)"
 	for f in "$req1" "$req2"; do
 		mark_set "$f"
 	done
@@ -9841,7 +9846,7 @@ repair_forced_start() {
 	assert_eq "$BS_ROW" RES_STATUS_OK \
 		"repair badstop: way 2 outside the window: the row over both lists"
 
-	stage badwindow "way 2 in the window: a new mark while the row reads ERROR, the level stepped down and up, drops both lists"
+	stage badwindow "a new mark while the row reads ERROR, the level stepped down and up, drops both lists"
 	# Right after the failed stop the row reads ERROR, the one state of this
 	# sequence in which the gateway takes a new mark, as it refuses one over a
 	# row that reads OK and at the level with no group array (architecture.md,
@@ -9868,8 +9873,8 @@ repair_forced_start() {
 		die "repair badstop: way 2 in the window: the new mark did not start the array again from the named leg"
 	badstop_swap
 
-	stage badmdadm "way 3: mdadm's own drop of both lists at the level with no group array"
-	# The mark cleared as the worker clears it, at the level with no group
+	stage badmdadm "the mark cancelled, mdadm's own drop of both lists at the level with no group array"
+	# The mark cancelled as the operator cancels it, at the level with no group
 	# array mdadm assembles the array from both members by hand, passing
 	# force-no-bbl, which drops each one's list, and stops it; the level step
 	# up then assembles it as the agent does.

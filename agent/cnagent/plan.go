@@ -303,8 +303,17 @@ type grpPlan struct {
 	mark *pb.ForcedStart
 	// forcedRan says that this pass's forced start ran its assembly
 	// (forcedAssemble), whatever came of it, so the converge records the
-	// mark as the one this incarnation acted on (cntlrState.forcedStarts).
+	// mark as the one this incarnation acted on (cntlrState.forcedStarts),
+	// unless forcedListKept says that its stop failed.
 	forcedRan bool
+	// forcedListKept says that this pass's forced start started the array
+	// from the named leg with the leg's bad-block list, and the stop that
+	// would drop the list failed (forcedAssemble): the start is not done,
+	// so the converge drops the group's acted mark in place of setting it,
+	// also one an earlier start of the same mark left, and the worker keeps
+	// the mark, which acts again at the array's next stop (cnagent.md
+	// CN12).
+	forcedListKept bool
 	// linearName is what this pass names a RedundNone group's dm-linear
 	// with (cntlrRowVerdict, CN30), nil for nothing: a converge's step on it
 	// that failed, or a read's linearGroupName.

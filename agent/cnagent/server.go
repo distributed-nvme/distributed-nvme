@@ -223,7 +223,9 @@ type cntlrState struct {
 	// acted mark (CN12). In memory only: an agent restart forgets it, and
 	// the mark then waits for the operator's cancel (cnagent.md, Known
 	// limits). A forced start that runs its assembly sets it
-	// (grpPlan.forcedRan), and nothing but the request clears it: every
+	// (grpPlan.forcedRan), and one whose stop to drop the named leg's
+	// bad-block list failed drops it (grpPlan.forcedListKept), since that
+	// start is not done; nothing else but the request clears it: every
 	// converge drops the entry of a group whose request carries no mark or a
 	// mark of another revision (keepForcedStarts). Both channels report it in
 	// the group's reading of a running array while the request, counting as
