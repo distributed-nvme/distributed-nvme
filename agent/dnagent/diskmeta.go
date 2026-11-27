@@ -45,14 +45,17 @@ type DiskMeta struct {
 	// whose magic matches but whose version or CRC does not is neither: it
 	// makes every method return an error, and is never overwritten.
 	formatted bool
-	// want is the identity this agent serves the disk for: the
-	// (cluster_id, dn_id, extent_size) the DN converge last handed
-	// EnsureFormatted, nil until one has. It is desired state, not a
-	// result — EnsureFormatted sets it before it reads anything, so a
-	// converge whose header read did not answer sets it all the same — and
-	// confirmedLocked compares the loaded header with it at every hand-out
-	// of a record and every mutation.
-	want  *diskIdentity
+	// wants are the identities this agent serves the disk for, one per
+	// disk node it converges: the (cluster_id, dn_id, extent_size) each DN
+	// converge handed EnsureFormatted, keyed by its cluster and dn ids, none
+	// until one has. They are desired state, not a result — EnsureFormatted
+	// sets its DN's before it reads anything, so a converge whose header
+	// read did not answer sets it all the same — and confirmedForLocked
+	// compares the loaded header with the identity of the disk node a call
+	// is made for at every hand-out of a record and every mutation. One per
+	// disk node, so a converge of one disk node never changes what another's
+	// sides may use (DN5).
+	wants map[[2]uint64]diskIdentity
 	hdr   *pb.DnDiskHeader
 	table *pb.DnDiskTable
 	seq   uint64
@@ -97,7 +100,8 @@ const (
 )
 
 func NewDiskMeta(oc common.OsClient, disk string) *DiskMeta {
-	return &DiskMeta{oc: oc, disk: disk, newestSlot: -1}
+	return &DiskMeta{oc: oc, disk: disk, newestSlot: -1,
+		wants: make(map[[2]uint64]diskIdentity)}
 }
 
 // readBlock / writeBlock bound every raw-device call by the soft timeout
@@ -336,7 +340,7 @@ func dnSlotRoundUp(n uint64) uint64 {
 // It records (clusterId, dnId, extentSize) as the identity this agent serves
 // the disk for before it reads anything, so every later use of the table can
 // be checked against it even when this call's own read did not answer
-// (confirmedLocked).
+// (confirmedForLocked).
 //
 // mayFormat is asked only when the header is blank, before anything is
 // written, and the disk is formatted only when it answers nil. The DN
@@ -353,14 +357,14 @@ func (d *DiskMeta) EnsureFormatted(
 ) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.want = &diskIdentity{
+	d.wants[[2]uint64{clusterId, dnId}] = diskIdentity{
 		clusterId: clusterId, dnId: dnId, extentSize: extentSize,
 	}
 	if err := d.load(ctx); err != nil {
 		return err
 	}
 	if d.formatted {
-		return d.confirmedLocked()
+		return d.confirmedForLocked(clusterId, dnId)
 	}
 	if extentSize == 0 {
 		return fmt.Errorf("extent_size is 0")
@@ -467,32 +471,51 @@ func foreignDiskError(got diskIdentity, want diskIdentity) error {
 		want.clusterId, want.dnId, want.extentSize)
 }
 
-// confirmedLocked is DN5's identity check, and the gate of every use of the
-// volume table as this node's: handing out a record it already holds as much
-// as every mutation, because an existing record's extents are this node's
-// only if its table is. It compares the header the table was loaded under
-// with the identity the DN converge asked for (want), so it needs no read of
-// its own: one header read that did not answer leaves the disk unconfirmed
-// only until a later read of it — any call's — has answered, and a disk whose
-// header names another cluster, dn or extent size is refused whether or not
-// a check has answered. The caller has loaded the table.
+// confirmedForLocked is DN5's identity check, and the gate of every use of
+// the volume table as the disk node (clusterId, dnId)'s: handing out a record
+// it already holds as much as every mutation, because an existing record's
+// extents are that node's only if its table is. It compares the header the
+// table was loaded under with the identity that disk node's converge asked
+// for (wants), so it needs no read of its own: one header read that did not
+// answer leaves the disk unconfirmed only until a later read of it — any
+// call's — has answered, and a disk whose header names another cluster, dn
+// or extent size is refused whether or not a check has answered. Each call
+// names its own disk node — a side's, a migration's, a DN's — so the check
+// holds whichever disk node converged last when an agent holds two (DN5).
+// The caller has loaded the table.
 //
 // The gate lives here rather than in the caller because a failed DN converge
 // does not stop the side converges that follow (DN19): without it a node
 // pointed at another node's disk would report meta_info = RES_STATUS_ERROR
 // and then build its devices over that disk's records anyway.
-func (d *DiskMeta) confirmedLocked() error {
+func (d *DiskMeta) confirmedForLocked(clusterId, dnId uint64) error {
+	want, asked := d.wants[[2]uint64{clusterId, dnId}]
 	switch {
 	case !d.formatted:
 		return fmt.Errorf("disk is not formatted")
-	case d.want == nil:
+	case !asked:
 		return fmt.Errorf(
-			"disk identity is not confirmed for this node; " +
-				"refusing to use its volume table")
-	case headerIdentity(d.hdr) != *d.want:
-		return foreignDiskError(headerIdentity(d.hdr), *d.want)
+			"disk identity is not confirmed for disk node %d/%d; "+
+				"refusing to use its volume table", clusterId, dnId)
+	case headerIdentity(d.hdr) != want:
+		return foreignDiskError(headerIdentity(d.hdr), want)
 	}
 	return nil
+}
+
+// confirmedOwnerLocked is the disk node the header names, when that disk
+// node's converge asked for this disk (confirmedForLocked); ok is false on
+// an unformatted disk or one no converge asked for. The caller has loaded
+// the table.
+func (d *DiskMeta) confirmedOwnerLocked() (uint64, uint64, bool) {
+	if !d.formatted {
+		return 0, 0, false
+	}
+	c, n := d.hdr.GetClusterId(), d.hdr.GetDnId()
+	if d.confirmedForLocked(c, n) != nil {
+		return 0, 0, false
+	}
+	return c, n, true
 }
 
 // forgetLocked drops the loaded table, so the next call re-reads the disk
@@ -606,7 +629,7 @@ func (d *DiskMeta) countsLocked() tableCounts {
 
 // Counts is the disk counts (DN18) of the dn (clusterId, dnId) whose request
 // names ptrs, read from memory: nil unless the table in memory was loaded
-// under a header this node has confirmed for exactly that dn (confirmedLocked)
+// under a header this node has confirmed for exactly that dn (confirmedForLocked)
 // and a read of the disk's size has answered (SetDiskSize). Without the
 // confirmation the numbers would not be this dn's, and without the size the
 // extent counts would read as zero rather than as unknown. side_recs_match
@@ -620,8 +643,7 @@ func (d *DiskMeta) Counts(
 ) *pb.DnInfo_DiskCounts {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.confirmedLocked() != nil || d.diskSize == 0 ||
-		d.hdr.GetClusterId() != clusterId || d.hdr.GetDnId() != dnId {
+	if d.confirmedForLocked(clusterId, dnId) != nil || d.diskSize == 0 {
 		return nil
 	}
 	counts := d.countsLocked()
@@ -682,7 +704,7 @@ func (d *DiskMeta) provisioningSideCntLocked() uint64 {
 // that table, so the next call re-reads the disk rather than serving the old
 // extent map. A read that did not answer changes nothing: it says nothing
 // about what the disk holds. The probe confirms nothing itself; its lazy load
-// is one more read that confirmedLocked can compare.
+// is one more read that confirmedForLocked can compare.
 func (d *DiskMeta) ProbeHeader(
 	ctx context.Context,
 	clusterId uint64,
@@ -756,7 +778,7 @@ func (d *DiskMeta) LookupSide(
 
 // LookupConfirmedSide is LookupSide for a caller that acts on the record as
 // this node's: a record is handed out only from a table whose header this
-// node has confirmed (confirmedLocked), and one the table holds on a disk it
+// node has confirmed (confirmedForLocked), and one the table holds on a disk it
 // has not is an error, exactly as AllocSide's hand-out is. A table that holds
 // no such record answers "absent", whoever's disk it is: there is nothing to
 // hand out. DN9's zeroing loop reads its batches through it, so a header that
@@ -765,6 +787,8 @@ func (d *DiskMeta) LookupSide(
 // whether zeroing should be running at all.
 func (d *DiskMeta) LookupConfirmedSide(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	sideId uint64,
 ) (*pb.DnDiskTable_SideRecord, bool, error) {
@@ -777,7 +801,7 @@ func (d *DiskMeta) LookupConfirmedSide(
 	if rec == nil {
 		return nil, false, nil
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return nil, false, err
 	}
 	return rec, true, nil
@@ -831,7 +855,7 @@ func (d *DiskMeta) CloneMetaRecords(
 
 // Identity is the (cluster_id, dn_id) of a **confirmed** disk; ok is false on
 // an unloaded, unformatted or foreign one, or before any DN converge has said
-// whose disk this is (confirmedLocked). It reads nothing: a table no read has
+// whose disk this is (confirmedForLocked). It reads nothing: a table no read has
 // loaded yet is unconfirmed. It is what lets a record found by the orphan
 // sweep be turned back into a dm device name — and, because the sweep both
 // removes dm devices and frees records, requiring the confirmation here is
@@ -839,10 +863,10 @@ func (d *DiskMeta) CloneMetaRecords(
 func (d *DiskMeta) Identity() (uint64, uint64, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if !d.loaded || d.confirmedLocked() != nil {
+	if !d.loaded {
 		return 0, 0, false
 	}
-	return d.hdr.GetClusterId(), d.hdr.GetDnId(), true
+	return d.confirmedOwnerLocked()
 }
 
 // SetDiskSize tells the allocator how big the raw device is; the DN converge
@@ -971,9 +995,11 @@ func sideNextZeroBatch(
 // request is an error, and so is one whose length to zero disagrees with
 // zeroBytes — the length is fixed at allocation, like the extents. The
 // existing record passes the same identity gate as a new one
-// (confirmedLocked): its extents are this node's only if its table is.
+// (confirmedForLocked): its extents are this node's only if its table is.
 func (d *DiskMeta) AllocSide(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	sideId uint64,
 	extCnt uint64,
@@ -984,7 +1010,7 @@ func (d *DiskMeta) AllocSide(
 	if err := d.load(ctx); err != nil {
 		return nil, err
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return nil, err
 	}
 	if rec := findSide(d.table, spId, sideId); rec != nil {
@@ -1078,6 +1104,8 @@ func (d *DiskMeta) planSideLocked(
 // (DN16).
 func (d *DiskMeta) SideAllocRefusal(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	sideId uint64,
 	extCnt uint64,
@@ -1088,7 +1116,7 @@ func (d *DiskMeta) SideAllocRefusal(
 	if err := d.load(ctx); err != nil {
 		return err
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return err
 	}
 	if rec := findSide(d.table, spId, sideId); rec != nil {
@@ -1114,6 +1142,8 @@ func (d *DiskMeta) SideAllocRefusal(
 // replay free (SH16).
 func (d *DiskMeta) SetSideZeroed(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	sideId uint64,
 	from uint64,
@@ -1124,7 +1154,7 @@ func (d *DiskMeta) SetSideZeroed(
 	if err := d.load(ctx); err != nil {
 		return err
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return err
 	}
 	rec := findSide(d.table, spId, sideId)
@@ -1154,6 +1184,8 @@ func (d *DiskMeta) SetSideZeroed(
 // FreeSide is idempotent: an absent record issues no write.
 func (d *DiskMeta) FreeSide(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	sideId uint64,
 ) error {
@@ -1165,7 +1197,7 @@ func (d *DiskMeta) FreeSide(
 	if !d.formatted || findSide(d.table, spId, sideId) == nil {
 		return nil
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return err
 	}
 	next := proto.Clone(d.table).(*pb.DnDiskTable)
@@ -1195,7 +1227,7 @@ func (d *DiskMeta) FreeSide(
 // reports as provisioning (DN13). Every other refusal is a plain error.
 //
 // An existing record passes the same identity gate as a new one, exactly as
-// AllocSide's does (confirmedLocked): its slot is this node's only if its
+// AllocSide's does (confirmedForLocked): its slot is this node's only if its
 // table is. Gated differently from the side record, it could be refused in
 // a converge that got past the side record: that pass would stop at its run,
 // before the side zeroes or at DN13 step 2, and a destination whose dm-clone
@@ -1203,13 +1235,15 @@ func (d *DiskMeta) FreeSide(
 // serves keeps serving either way (migrDstStopped).
 func (d *DiskMeta) AllocCloneMeta(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	migrId uint64,
 	units uint64,
 ) (*pb.DnDiskTable_CloneMetaRecord, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	have, start, err := d.gateCloneMetaLocked(ctx, spId, migrId, units)
+	have, start, err := d.gateCloneMetaLocked(ctx, clusterId, dnId, spId, migrId, units)
 	if err != nil || have != nil {
 		return have, err
 	}
@@ -1238,13 +1272,15 @@ func (d *DiskMeta) AllocCloneMeta(
 // converge's step refuses.
 func (d *DiskMeta) HeldCloneMeta(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	migrId uint64,
 	units uint64,
 ) (*pb.DnDiskTable_CloneMetaRecord, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	have, _, err := d.gateCloneMetaLocked(ctx, spId, migrId, units)
+	have, _, err := d.gateCloneMetaLocked(ctx, clusterId, dnId, spId, migrId, units)
 	switch {
 	case err != nil:
 		return nil, err
@@ -1257,9 +1293,11 @@ func (d *DiskMeta) HeldCloneMeta(
 
 // gateCloneMetaLocked is every decision AllocCloneMeta takes before it
 // writes, in its order: the table loaded, the identity gate
-// (confirmedLocked), a count above zero, then the plan (planCloneMetaLocked).
+// (confirmedForLocked), a count above zero, then the plan (planCloneMetaLocked).
 func (d *DiskMeta) gateCloneMetaLocked(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	migrId uint64,
 	units uint64,
@@ -1267,7 +1305,7 @@ func (d *DiskMeta) gateCloneMetaLocked(
 	if err := d.load(ctx); err != nil {
 		return nil, 0, err
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return nil, 0, err
 	}
 	if units == 0 {
@@ -1315,7 +1353,7 @@ func (d *DiskMeta) planCloneMetaLocked(
 // than the request, a request larger than the whole area, or no free run that
 // fits it, the one typed refusal (isNoFreeRun) — and nil when the area would
 // supply one. Nothing else AllocCloneMeta refuses is checked: not the
-// identity gate it applies first (confirmedLocked), and a table that cannot
+// identity gate it applies first (confirmedForLocked), and a table that cannot
 // be read, an unformatted disk and a zero count (no caller passes one) read
 // as nil.
 func (d *DiskMeta) CloneMetaRefusal(
@@ -1350,6 +1388,8 @@ func (d *DiskMeta) zeroCloneMetaHead(ctx context.Context, start uint64) error {
 // FreeCloneMeta is idempotent.
 func (d *DiskMeta) FreeCloneMeta(
 	ctx context.Context,
+	clusterId uint64,
+	dnId uint64,
 	spId uint64,
 	migrId uint64,
 ) error {
@@ -1361,7 +1401,7 @@ func (d *DiskMeta) FreeCloneMeta(
 	if !d.formatted || findCloneMeta(d.table, spId, migrId) == nil {
 		return nil
 	}
-	if err := d.confirmedLocked(); err != nil {
+	if err := d.confirmedForLocked(clusterId, dnId); err != nil {
 		return err
 	}
 	next := proto.Clone(d.table).(*pb.DnDiskTable)

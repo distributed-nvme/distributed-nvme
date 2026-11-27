@@ -749,8 +749,7 @@ func (s *DnAgentServer) migrMetaRefusal(
 	if err != nil {
 		return err
 	}
-	return s.meta.CloneMetaRefusal(
-		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+	return s.meta.CloneMetaRefusal(ctx, plan.spId, plan.migrDst.GetMigrId(), units)
 }
 
 // migrMetaRead is DN13 step (2) as a read-only pass reads it, and nil when
@@ -766,8 +765,8 @@ func (s *DnAgentServer) migrMetaRead(
 	if err != nil {
 		return err
 	}
-	rec, err := s.meta.HeldCloneMeta(
-		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+	rec, err := s.meta.HeldCloneMeta(ctx, plan.clusterId, plan.dnId,
+		plan.spId, plan.migrDst.GetMigrId(), units)
 	if err != nil {
 		return err
 	}
@@ -905,8 +904,8 @@ func (s *DnAgentServer) holdMigrMeta(
 	if err != nil {
 		return err
 	}
-	_, err = s.meta.AllocCloneMeta(
-		ctx, plan.spId, plan.migrDst.GetMigrId(), units)
+	_, err = s.meta.AllocCloneMeta(ctx, plan.clusterId, plan.dnId,
+		plan.spId, plan.migrDst.GetMigrId(), units)
 	return err
 }
 
@@ -929,7 +928,8 @@ func (s *DnAgentServer) ensureMigrMeta(
 		return err
 	}
 	migrId := plan.migrDst.GetMigrId()
-	rec, err := s.meta.AllocCloneMeta(ctx, plan.spId, migrId, units)
+	rec, err := s.meta.AllocCloneMeta(ctx, plan.clusterId, plan.dnId,
+		plan.spId, migrId, units)
 	if err != nil {
 		return err
 	}

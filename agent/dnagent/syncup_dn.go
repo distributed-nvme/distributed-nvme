@@ -333,8 +333,11 @@ func (s *DnAgentServer) sweepOrphanRecords(
 	clusterId, dnId, ok := s.meta.Identity()
 	if !ok {
 		// Unformatted, unreadable, corrupt, not read since the agent started
-		// or since a probe dropped the table, or a disk whose header names
-		// another node — nothing here may be freed. Nor is the pass clean:
+		// or since a probe dropped the table, or a disk whose header names a
+		// node no converge of this agent asked for — nothing here may be
+		// freed. (A disk whose header names one held disk node frees under
+		// that node's ids in every held disk node's sweep, against the known
+		// sides of all of them, DN5.) Nor is the pass clean:
 		// this step could not run, and a verdict that stayed OK would leave
 		// nothing to re-drive the SyncupDn whose converge reads the disk
 		// again and formats a blank one once no device maps it (DN5). A disk
@@ -383,8 +386,8 @@ func (s *DnAgentServer) sweepOrphanRecords(
 			res.Add(agent.LeftoverKindRecord, name)
 			continue
 		}
-		if err := s.meta.FreeSide(
-			ctx, rec.GetSpId(), rec.GetSideId()); err != nil {
+		if err := s.meta.FreeSide(ctx, clusterId, dnId, rec.GetSpId(),
+			rec.GetSideId()); err != nil {
 			slog.ErrorContext(ctx, "freeing an orphan side record failed",
 				slog.String("error", err.Error()))
 			res.Fail("free side record "+name, err)
@@ -423,8 +426,8 @@ func (s *DnAgentServer) sweepOrphanRecords(
 			res.Add(agent.LeftoverKindRecord, name)
 			continue
 		}
-		if err := s.meta.FreeCloneMeta(
-			ctx, rec.GetSpId(), rec.GetMigrId()); err != nil {
+		if err := s.meta.FreeCloneMeta(ctx, clusterId, dnId, rec.GetSpId(),
+			rec.GetMigrId()); err != nil {
 			slog.ErrorContext(ctx,
 				"freeing an orphan clone-metadata record failed",
 				slog.String("error", err.Error()))
@@ -611,7 +614,6 @@ func (s *DnAgentServer) syncupDn(
 			Revision:   stored,
 		}
 	}
-
 	// The dn file is persisted as soon as the gates admit the request,
 	// BEFORE it becomes the desired state and before the sweep (SH5). The
 	// sweep is what removes the resources of a side whose pointer has just

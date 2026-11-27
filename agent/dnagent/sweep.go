@@ -801,7 +801,8 @@ func (s *DnAgentServer) freeSideOf(
 	if !gate.freeSide(dn.Ids[0], dn.Ids[1]) {
 		return
 	}
-	if err := s.meta.FreeSide(ctx, dn.Ids[0], dn.Ids[1]); err != nil {
+	if err := s.meta.FreeSide(ctx, dn.ClusterId, dn.NodeId, dn.Ids[0],
+		dn.Ids[1]); err != nil {
 		slog.ErrorContext(ctx, "freeing the side allocation failed",
 			slog.String("error", err.Error()))
 		res.Fail("free side record "+name, err)
@@ -821,7 +822,8 @@ func (s *DnAgentServer) freeCloneMetaOf(
 	if !gate.freeCloneMeta(dn.Ids[0], dn.Ids[1]) {
 		return
 	}
-	if err := s.meta.FreeCloneMeta(ctx, dn.Ids[0], dn.Ids[1]); err != nil {
+	if err := s.meta.FreeCloneMeta(ctx, dn.ClusterId, dn.NodeId,
+		dn.Ids[0], dn.Ids[1]); err != nil {
 		slog.ErrorContext(ctx, "freeing the clone-metadata slot failed",
 			slog.String("error", err.Error()))
 		res.Fail("free clone metadata record "+name, err)
@@ -2027,15 +2029,16 @@ func (s *DnAgentServer) zeroingVerdict(
 	read *pb.SideInfo,
 	res *agent.SweepResult,
 ) {
-	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.spId, plan.sideId)
+	rec, ok, err := s.meta.LookupConfirmedSide(ctx, plan.clusterId,
+		plan.dnId, plan.spId, plan.sideId)
 	if err != nil || !ok || sideFullyZeroed(rec) {
 		return
 	}
 	// A record AllocSide refuses — it disagrees with the request — starts
 	// no zeroing, and a re-sent request is refused the same way, as
 	// rowVerdict leaves such a side.
-	if s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
-		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
+	if s.meta.SideAllocRefusal(ctx, plan.clusterId, plan.dnId, plan.spId,
+		plan.sideId, plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
 		return
 	}
 	s.mu.Lock()
@@ -2137,8 +2140,8 @@ func (s *DnAgentServer) rowVerdict(
 	// the request, a disk not confirmed — names nothing: a re-sent request
 	// is refused the same way, and every row above it is judged by the
 	// request's geometry, which the record does not have.
-	if s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
-		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
+	if s.meta.SideAllocRefusal(ctx, plan.clusterId, plan.dnId, plan.spId,
+		plan.sideId, plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()) != nil {
 		return
 	}
 	if row := info.GetSideDevInfo(); row != nil {
@@ -2147,7 +2150,7 @@ func (s *DnAgentServer) rowVerdict(
 			nameRow(row, res)
 		case pb.ResStatus_RES_STATUS_ERROR:
 			rec, ok, err := s.meta.LookupConfirmedSide(
-				ctx, plan.spId, plan.sideId)
+				ctx, plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 			if err == nil && ok && sideFullyZeroed(rec) {
 				nameRow(row, res)
 			}

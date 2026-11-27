@@ -71,9 +71,11 @@ const (
 // Where to zero comes from the record, re-read every batch, in bytes of the
 // side device, so the loop needs no extent size.
 type zeroJob struct {
-	spId    uint64
-	sideId  uint64
-	devPath string
+	clusterId uint64
+	dnId      uint64
+	spId      uint64
+	sideId    uint64
+	devPath   string
 }
 
 // startZeroing registers the side's zeroing loop if it is not running already.
@@ -89,9 +91,11 @@ type zeroJob struct {
 func (s *DnAgentServer) startZeroing(st *sideState, plan *sidePlan) {
 	key := sideKey(plan.clusterId, plan.dnId, plan.spId, plan.sideId)
 	job := zeroJob{
-		spId:    plan.spId,
-		sideId:  plan.sideId,
-		devPath: plan.sideDevPath,
+		clusterId: plan.clusterId,
+		dnId:      plan.dnId,
+		spId:      plan.spId,
+		sideId:    plan.sideId,
+		devPath:   plan.sideDevPath,
 	}
 	s.mu.Lock()
 	if st.zeroing || s.bgClosedLocked() {
@@ -231,7 +235,7 @@ func (s *DnAgentServer) zeroLoop(
 		// loop, say — is refused here, before a batch is computed from its
 		// count, and the loop paces until a read of the disk confirms it.
 		rec, ok, err := s.meta.LookupConfirmedSide(
-			attemptCtx, job.spId, job.sideId)
+			attemptCtx, job.clusterId, job.dnId, job.spId, job.sideId)
 		if err != nil {
 			s.setZeroingErr(st, err)
 			if !s.zeroPace(ctx) {
@@ -286,8 +290,8 @@ func (s *DnAgentServer) zeroLoop(
 			// process redoes the batch.
 			return
 		}
-		err = s.meta.SetSideZeroed(
-			attemptCtx, job.spId, job.sideId, from, from+count)
+		err = s.meta.SetSideZeroed(attemptCtx, job.clusterId, job.dnId,
+			job.spId, job.sideId, from, from+count)
 		release()
 		if err != nil {
 			s.setZeroingErr(st, err)

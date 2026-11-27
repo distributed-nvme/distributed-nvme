@@ -802,7 +802,7 @@ func TestMigrationDestinationExhaustionIsReportedAndResent(t *testing.T) {
 
 	// Another sp's migration holds the whole area.
 	const otherSp, otherMigr = testSp + 1, testMigrId + 1
-	if _, err := srv.meta.AllocCloneMeta(ctx, otherSp, otherMigr,
+	if _, err := srv.meta.AllocCloneMeta(ctx, testCluster, testDn, otherSp, otherMigr,
 		common.DnCloneMetaUnitCnt); err != nil {
 		t.Fatalf("AllocCloneMeta: %v", err)
 	}
@@ -873,7 +873,7 @@ func TestMigrationDestinationExhaustionIsReportedAndResent(t *testing.T) {
 
 	// The other migration ends: the next round names the slot, and its
 	// re-send builds the destination.
-	if err := srv.meta.FreeCloneMeta(ctx, otherSp, otherMigr); err != nil {
+	if err := srv.meta.FreeCloneMeta(ctx, testCluster, testDn, otherSp, otherMigr); err != nil {
 		t.Fatalf("FreeCloneMeta: %v", err)
 	}
 	round, resent := workerRound(t, srv, held, "round-1")

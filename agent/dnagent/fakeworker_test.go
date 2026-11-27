@@ -677,7 +677,7 @@ func TestVolumeTableFillsItsSlot(t *testing.T) {
 	}
 	plantedSeq := meta.seq
 
-	rec, err := meta.AllocSide(ctx, testSp, testSide, 1, metaExtentSize)
+	rec, err := meta.AllocSide(ctx, testCluster, testDn, testSp, testSide, 1, metaExtentSize)
 	if err != nil {
 		t.Fatalf("the allocation that fills the slot exactly: %v", err)
 	}
@@ -705,12 +705,12 @@ func TestVolumeTableFillsItsSlot(t *testing.T) {
 	slotText := fmt.Sprintf("over the %d slot size", common.DnTableSlotSize)
 	node.Reset()
 	if _, err := meta.AllocSide(
-		ctx, testSp, testSide2, 1, metaExtentSize); err == nil ||
+		ctx, testCluster, testDn, testSp, testSide2, 1, metaExtentSize); err == nil ||
 		!strings.Contains(err.Error(), slotText) {
 		t.Errorf("an allocation past the slot = %v, want %q", err, slotText)
 	}
 	if err := meta.SetSideZeroed(
-		ctx, testSp, testSide, 0, metaExtentSize); err == nil ||
+		ctx, testCluster, testDn, testSp, testSide, 0, metaExtentSize); err == nil ||
 		!strings.Contains(err.Error(), slotText) {
 		t.Errorf("a zeroing step past the slot = %v, want %q", err, slotText)
 	}

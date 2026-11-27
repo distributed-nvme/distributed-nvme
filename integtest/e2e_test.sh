@@ -11035,7 +11035,7 @@ cleanup_all() {
 # dn_ids, and every DN's
 # 4 KiB disk header still names the old ones, so EnsureFormatted refuses each
 # one as a "foreign disk" and never re-formats
-# (confirmedLocked (agent/dnagent/diskmeta.go)). main therefore calls
+# (confirmedForLocked (agent/dnagent/diskmeta.go)). main therefore calls
 # setup_between_cases, which is cleanup_all + setup_infra + setup_case. This
 # stays defined
 # because it is the right tool for a case that wants a fresh etcd WITHOUT
@@ -11437,7 +11437,7 @@ diagnostics() {
 #     header at format time, and EnsureFormatted REFUSES a disk whose header
 #     names another cluster/dn/extent ("foreign disk: cluster/dn/extent is
 #     …, want …", foreignDiskError (agent/dnagent/diskmeta.go)); ProbeHeader
-#     reports the same and confirmedLocked then refuses to touch the volume
+#     reports the same and confirmedForLocked then refuses to touch the volume
 #     table at all. It never re-formats.
 #
 # So every case must start on disks with NO header, which means the backing

@@ -2453,7 +2453,7 @@ func stopTestServer(t *testing.T, srv *DnAgentServer) {
 func clearRecord(t *testing.T, srv *DnAgentServer, node *fakeNode) {
 	t.Helper()
 	other := newVerifiedMeta(t, node)
-	if err := other.FreeSide(context.Background(), testSp, testSide); err != nil {
+	if err := other.FreeSide(context.Background(), testCluster, testDn, testSp, testSide); err != nil {
 		t.Fatalf("FreeSide: %v", err)
 	}
 	srv.meta = newVerifiedMeta(t, node)
@@ -2470,11 +2470,11 @@ func clearZeroed(t *testing.T, srv *DnAgentServer, node *fakeNode) {
 	t.Helper()
 	ctx := context.Background()
 	other := newVerifiedMeta(t, node)
-	if err := other.FreeSide(ctx, testSp, testSide); err != nil {
+	if err := other.FreeSide(ctx, testCluster, testDn, testSp, testSide); err != nil {
 		t.Fatalf("FreeSide: %v", err)
 	}
 	if _, err := other.AllocSide(
-		ctx, testSp, testSide, testExtCnt, testZeroBytes); err != nil {
+		ctx, testCluster, testDn, testSp, testSide, testExtCnt, testZeroBytes); err != nil {
 		t.Fatalf("AllocSide: %v", err)
 	}
 	srv.meta = newVerifiedMeta(t, node)
@@ -4257,12 +4257,12 @@ func TestFragmentedSideBuildsMultiTargetTable(t *testing.T) {
 	total := (node.devSize[testDisk] - common.DnDataOffset) / testExtentSize
 	for i := uint64(0); i < total; i++ {
 		if _, err := srv.meta.AllocSide(
-			ctx, 0xaa, i, 1, testExtentSize); err != nil {
+			ctx, testCluster, testDn, 0xaa, i, 1, testExtentSize); err != nil {
 			t.Fatalf("filling: %v", err)
 		}
 	}
 	for i := uint64(1); i < total; i += 2 {
-		if err := srv.meta.FreeSide(ctx, 0xaa, i); err != nil {
+		if err := srv.meta.FreeSide(ctx, testCluster, testDn, 0xaa, i); err != nil {
 			t.Fatalf("freeing: %v", err)
 		}
 	}

@@ -35,7 +35,7 @@ var testMigrMetaUnits = common.CloneMetaUnits(
 // held side claims (DN6).
 func fillMetaArea(t *testing.T, srv *DnAgentServer) {
 	t.Helper()
-	if _, err := srv.meta.AllocCloneMeta(context.Background(), fillSp,
+	if _, err := srv.meta.AllocCloneMeta(context.Background(), testCluster, testDn, fillSp,
 		fillMigr, common.DnCloneMetaUnitCnt); err != nil {
 		t.Fatalf("filling the clone-metadata area: %v", err)
 	}
@@ -45,7 +45,7 @@ func fillMetaArea(t *testing.T, srv *DnAgentServer) {
 func freeMetaArea(t *testing.T, srv *DnAgentServer) {
 	t.Helper()
 	if err := srv.meta.FreeCloneMeta(
-		context.Background(), fillSp, fillMigr); err != nil {
+		context.Background(), testCluster, testDn, fillSp, fillMigr); err != nil {
 		t.Fatalf("FreeCloneMeta: %v", err)
 	}
 }

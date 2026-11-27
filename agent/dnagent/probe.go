@@ -187,8 +187,8 @@ func (s *DnAgentServer) probeSideDev(
 			// reads ERROR with the refusal, as the converge's AllocSide
 			// reports it (DN9), so the two channels agree and the side's
 			// health epoch is not cleared by every read.
-			if refusal := s.meta.SideAllocRefusal(ctx, plan.spId,
-				plan.sideId, plan.conf.GetExtCnt(),
+			if refusal := s.meta.SideAllocRefusal(ctx, plan.clusterId,
+				plan.dnId, plan.spId, plan.sideId, plan.conf.GetExtCnt(),
 				plan.conf.GetZeroBytes()); refusal != nil {
 				info.SideDevInfo = t.Err(resKeySideDev, name, refusal.Error())
 			} else {
@@ -207,8 +207,9 @@ func (s *DnAgentServer) probeSideDev(
 	// confirmed, reads ERROR with the refusal, as the converge's AllocSide
 	// refuses it (DN9), whatever its device reads; the counters above are
 	// the record's all the same.
-	if refusal := s.meta.SideAllocRefusal(ctx, plan.spId, plan.sideId,
-		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes()); refusal != nil {
+	if refusal := s.meta.SideAllocRefusal(ctx, plan.clusterId, plan.dnId,
+		plan.spId, plan.sideId, plan.conf.GetExtCnt(),
+		plan.conf.GetZeroBytes()); refusal != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, refusal.Error())
 		return sideDevFailed, nil
 	}

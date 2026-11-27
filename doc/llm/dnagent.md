@@ -2426,12 +2426,23 @@ probe-first (SH16), building `DnInfo` as it goes:
   zeroing batch (`LookupConfirmedSide`), so no batch is computed from
   another node's record. Confirming needs no read of its own: this converge
   hands `DiskMeta` the identity it asks for **before** it reads anything,
-  and each of those operations compares the header the table in memory was
-  loaded under with it. So one header read that did not answer — this
-  converge's at startup, say — leaves the disk unconfirmed only until a
-  later read of it (a side converge's, a DN18 probe's) has answered, and a
-  disk whose header names another cluster, dn or extent size is refused
-  whether or not a check has answered. While no read has answered, the DN6
+  one identity per disk node, which a converge of another disk node leaves
+  as it is, and each of those operations is made for one disk node — the
+  side's own or the migration's side's; the record step's frees are made
+  for the disk node the header names (`Identity`), against every held
+  disk node's list — and compares the header the table in memory was
+  loaded under with the identity that disk node's converge asked for. So
+  one header read that did not answer — this converge's at startup, say —
+  leaves the disk unconfirmed only until a later read of it (a side
+  converge's, a DN18 probe's) has answered, and a disk whose header names
+  another cluster, dn or extent size is refused whether or not a check has
+  answered. An agent that holds two disk nodes — an operator's mistake:
+  its address created as a disk node of a second cluster, or two agents
+  that share one folder of local files — serves each side only from a disk
+  whose header names the side's own disk node, whichever of the two
+  converged last, and the disk node the header does not name reads its
+  disk as foreign, a meta row in error, which marks it unhealthy in its
+  cluster (`dnv-worker.md` HL1). While no read has answered, the DN6
   record step says so and the verdict is not clean, which re-drives this
   converge. Lookups that only report do not pass the check — the side
   converge's first look at the record, which fills the counters, and the

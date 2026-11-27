@@ -927,19 +927,6 @@ The entries:
   id, and its data is gone. It needs an agent restart, one failed read and
   an older request at once. State: fix decided. Read from dnv's code; not
   seen in the lab.
-- **One disk node's agent that holds two disk nodes checks its disk for
-  the wrong one.** Silent. A disk node's agent refuses a disk whose header block,
-  the disk's first block, where dnv records which node the disk belongs to,
-  names another node, but it keeps one wanted name for the whole program,
-  and each converge of one of its nodes overwrites it. An agent holds two
-  disk nodes after an operator's mistake: its address created as a disk
-  node in a second cluster, or two disk node agents that share one folder
-  of local files. Nothing refuses either. The first node's sides then read
-  as on a foreign disk and take no change, and a side of the second node
-  passes the check and gets extents in the first node's table. Both
-  clusters count their ids from the same start, so that side can even be
-  built over the extents of a side of the first. State: fix decided. Read
-  from dnv's code; not seen in the lab.
 - **A side can be marked provisioned from the counts of a foreign disk.**
   A disk node's agent fills its counts of the zeroing from the disk's own
   record of which extents each side holds, before it has confirmed that

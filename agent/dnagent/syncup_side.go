@@ -524,8 +524,8 @@ func (s *DnAgentServer) ensureSideDev(
 	// error is reported rather than discarded, because the matrix needs
 	// "could not allocate" to be distinguishable from "allocated" and from
 	// "must not allocate" (DN9).
-	rec, err = s.meta.AllocSide(ctx, plan.spId, plan.sideId,
-		plan.conf.GetExtCnt(), plan.conf.GetZeroBytes())
+	rec, err = s.meta.AllocSide(ctx, plan.clusterId, plan.dnId, plan.spId,
+		plan.sideId, plan.conf.GetExtCnt(), plan.conf.GetZeroBytes())
 	if err != nil {
 		info.SideDevInfo = t.Err(resKeySideDev, name, err.Error())
 		return sideDevFailed, nil
@@ -549,8 +549,8 @@ func (s *DnAgentServer) ensureSideDev(
 		// the verdict names (zeroingVerdict), so the re-send tries the write
 		// again, never the zeroing.
 		s.stopZeroing(st)
-		if err := s.meta.SetSideZeroed(
-			ctx, plan.spId, plan.sideId, zeroed, zero); err != nil {
+		if err := s.meta.SetSideZeroed(ctx, plan.clusterId, plan.dnId,
+			plan.spId, plan.sideId, zeroed, zero); err != nil {
 			slog.ErrorContext(ctx, msgZeroedCountWriteFailed,
 				slog.Uint64("sp_id", plan.spId),
 				slog.Uint64("side_id", plan.sideId),
