@@ -489,6 +489,9 @@ type fakeAgent struct {
 	// none, which reads as code OK: the UnknownObject refusal of an agent
 	// that does not hold the cntlr (cnagent.md CN23) is one a test installs.
 	cntlrReply *pb.AgentReply
+	// cntlrRevision is the revision every GetCntlrInfo reply carries,
+	// fakeAgentRevision while zero.
+	cntlrRevision uint64
 	// sideReply is the AgentReply every GetSideInfo reply carries, nil for
 	// none, as cntlrReply is GetCntlrInfo's.
 	sideReply *pb.AgentReply
@@ -813,9 +816,13 @@ func (f *fakeCnServer) GetCntlrInfo(
 	f.agent.mu.Lock()
 	defer f.agent.mu.Unlock()
 	f.agent.cntlrInfoReqs = append(f.agent.cntlrInfoReqs, req)
+	revision := fakeAgentRevision
+	if f.agent.cntlrRevision != 0 {
+		revision = f.agent.cntlrRevision
+	}
 	return &pb.GetCntlrInfoReply{
 		AgentReply: f.agent.cntlrReply,
-		Revision:   fakeAgentRevision,
+		Revision:   revision,
 		CntlrInfo:  f.agent.cntlrInfo,
 		ObsStamp:   f.agent.stamp,
 	}, nil

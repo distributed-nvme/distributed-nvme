@@ -36,7 +36,7 @@ func TestGrpReadingCarriesInSyncSlots(t *testing.T) {
 		},
 	}
 	info := &pb.CntlrInfo{GrpIdToGrpInfo: make(map[uint64]*pb.CntlrInfo_GrpInfo)}
-	reportGrpReading(info, gp, detail, grpRefusals{}, 0, 0)
+	reportGrpReading(info, gp, detail, grpRefusals{}, 0, 0, nil)
 	got := info.GetGrpIdToGrpInfo()[101]
 	if got == nil {
 		t.Fatalf("no reading of the group: %v", info.GetGrpIdToGrpInfo())

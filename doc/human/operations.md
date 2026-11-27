@@ -3498,17 +3498,12 @@ Steps that can lose data:
   reached then read what the new side's disk held there, possibly another
   pool's bytes, with no error.
 - `dnvctl migr cancel --force` after the cutover brings the old side back
-  as of the cutover. The leg loses every write since, and blocks first
-  mapped since read the old side's old bytes, possibly another pool's. md
-  still counts the leg whole, so in a RAID1 group reads can return those
-  bytes, and no call makes md copy the leg again: a repair is refused for a
-  leg with no health epoch, and a member that md failed when the leg went
-  back to its old side is added back from md's record of the regions
-  written while it was out, which holds none of these. The call also
-  returns before the primary stops using the new side, and a write until
-  then can land on the new side and be lost with it ([Ending a migration
-  with force](#ending-a-migration-with-force) says how to see the end of
-  that).
+  as of the cutover. In a RAID1 group with another leg in sync the primary
+  copies the leg again from that leg, and nothing is lost; elsewhere the leg
+  loses every write since, and blocks first mapped since read the old
+  side's old bytes, possibly another pool's, which the reply's `loss` says.
+  The reply comes once the primary uses the old side alone ([Ending a
+  migration with force](#ending-a-migration-with-force)).
 - A host's discard, the message that a range holds no data any more, as
   `fstrim` sends, on a leg past its cutover: it marks the region as copied
   on the new side, and when the primary dies within the second before its
@@ -3539,9 +3534,10 @@ and read [Ending a migration with force](#ending-a-migration-with-force).
 Tested: the e2e suite's copy case, stage 04: a migration under a capped
 copy, the cutover, the worker's read of the written blocks, the finish and
 the data read back; then a second migration, whose plain cancel after the
-cutover is refused and whose cancel with `--force` goes through. No host IO
-runs between that one's create and its cancel, so it proves the refusal and
-the steps, not the loss. Stage 04b resets the new side's disk node guest
+cutover is refused and whose cancel with `--force` goes through, host0
+writing before it, after its cutover and right after its reply, each write
+read back once the leg is copied again ([Ending a migration with
+force](#ending-a-migration-with-force)). Stage 04b resets the new side's disk node guest
 during a copy and reads the data after the copy ends. Both passed in the lab
 on 2026-11-21. The gateway's unit tests check each refusal.
 
@@ -3585,11 +3581,15 @@ Steps, by case:
    failed. End the migration so that the leg
    keeps the side that is gone: `dnvctl migr finish --name <name> --force`
    when the new side's disk node is gone, and
-   `dnvctl migr cancel --name <name> --force` when the old side's is and
-   the copy is not whole, so that the finish with no force is refused
-   ("When", above). The leg
-   then has no path. md fails its member, and the group serves from its
-   other leg, which holds every write. Then have the leg replaced at once,
+   `dnvctl migr cancel --name <name> --force --timeout 120` when the old
+   side's is and the copy is not whole, so that the finish with no force is
+   refused ("When", above). The forced cancel's answer waits for the
+   primary to use the old side's path, which is gone, so after a minute it
+   answers `DEADLINE_EXCEEDED`, saying the cancel is done: that is the case
+   here. Confirm the cancel: `dnvctl migr get --name <name>` answers
+   NOT_FOUND.
+   The leg then has no path. md fails its member, and the group serves
+   from its other leg, which holds every write. Then have the leg replaced at once,
    before the node can come back with its old or partial copy: once
    `dnvctl sp get` shows a health epoch (`err_epoch`) on the leg and no
    repair on the group (`rep_name` empty), create one:
@@ -3600,47 +3600,71 @@ Steps, by case:
    from the other leg, and a repair's bad leg never joins the array again.
    When the repair has finished, delete the retired leg it made, which
    holds no whole copy ([Retired legs](#retired-legs)).
-3. A group of one leg, in a pool without RAID, with a disk node gone and no
+3. A RAID1 group whose other leg md holds in sync, both disk nodes answer,
+   and the migration must end before its copy is whole:
+   `dnvctl migr cancel --name <name> --force --timeout 120`. The old side
+   serves again with its content as of the cutover, and the primary takes
+   the leg out of its md array and adds it back fresh, so md copies the
+   whole leg from the other leg, which holds every write. The reply reads
+   `copy_again` true and an empty `loss`. It comes once the primary uses
+   the old side alone and has begun the copy, from when md reads nothing
+   of the leg's old bytes, so the hosts may read and write after it. Before
+   the reply, for a few seconds, a read of the leg can return its old
+   bytes, with no error: keep the hosts stopped until the reply. The copy
+   is done when `dnvctl sp get` shows the leg's `recopy_revision` as "0":
+   the worker clears it once md holds the leg in sync again.
+4. A group of one leg, in a pool without RAID, with a disk node gone and no
    finish with no force that goes through ("When", above): no end keeps the
    data. A forced end that keeps the side that is gone leaves the leg on a
    dead side, and the volumes then give IO errors over that group for good.
    A forced end that keeps the side that answers serves what that side
    lacks: the old side lacks every write since the cutover, and the new
    side the regions its copy had not reached. Stop and ask for help.
-4. Both disk nodes answer, and the new side's copy row reads an error, as
-   when dm-clone's own records fail: neither forced end is safe. A forced
-   cancel serves the old side as of the cutover, which md counts whole; a
-   forced finish serves the regions not copied from the new side's disk.
-   Stop and ask for help.
+5. Both disk nodes answer, the new side's copy row reads an error, as
+   when dm-clone's own records fail, and the group has no other leg in
+   sync: neither forced end is safe. A forced cancel serves the old side as
+   of the cutover; a forced finish serves the regions not copied from the
+   new side's disk. Stop and ask for help. With another leg in sync, case 3
+   applies.
 
-Steps that can lose data: every forced end but those of cases 1 and 2. A
-forced cancel also loses nothing when nothing writes to the pool from the
-cutover until the primary has taken the cancel. The call returns before
-that, and until then a write can still land on the new side and is lost
-with it, unless another leg of the group in sync holds it too. So where
-the group has no other leg in sync, keep the hosts' writes stopped after a
-forced cancel until `dnvctl cntlr inspect --id <primary cntlr id>` shows
-`applied_revision` at least the pool's `sp_rev.revision` that `dnvctl sp
-get` shows after the cancel, and the leg's row under
-`cntlr_info.leg_id_to_leg` reads `RES_STATUS_OK`: the primary has then
-taken the cancel, and its converge drops its path to the new side. If that
-controller node's agent log holds the record `disconnecting a dead leg
-path failed` since the cancel, that path can still serve: keep the writes
-stopped and ask for help. In case 2, naming the wrong side as gone keeps a live side
-whose copy is old or partial, which md counts whole. A forced cancel of a
-copy that is whole throws away the new side, which holds every block: in
+Steps that can lose data: every forced end but those of cases 1, 2 and 3.
+A forced cancel in a group with no other leg in sync, or in a pool without
+RAID, loses every write since the cutover; its reply says so in `loss`.
+The reply comes once the primary uses the old side's path alone, so a host
+write after it lands on the old side. A reply of `DEADLINE_EXCEEDED` after
+a minute means the cancel is done but the primary may still use the new
+side's path: outside case 2, keep the hosts' writes stopped until
+`dnvctl cntlr inspect --id <primary cntlr id>` shows `applied_revision` at
+least the revision the error names, and the leg's row under
+`cntlr_info.leg_id_to_leg` as `RES_STATUS_OK` with the reason
+`RES_REASON_NONE`; the reason `RES_REASON_LEG_PATH_NOT_SOLE` says another
+path, such as the new side's, can still take its writes. A report older
+than that revision proves nothing: before the cancel the leg had two sides,
+whose row reads OK with no reason. A bare `DEADLINE_EXCEEDED` with no such
+message is dnvctl's own `--timeout`: confirm with `dnvctl migr get --name
+<name>` whether the cancel went through (NOT_FOUND). In case 2, naming the wrong side as gone keeps
+a live side whose copy is old or partial, which md counts whole. A forced
+cancel of a copy that is whole throws away the new side, which holds every
+block: in
 case 2 the group then runs on one copy until the repair ends, and a second
 fault in that time can lose data. Try the finish with no force first, as
 "When" says.
 
-When to stop: cases 3 and 4; you cannot tell whether a disk node is gone
+When to stop: cases 4 and 5; you cannot tell whether a disk node is gone
 for good; or the gateway refuses the repair of case 2 for a reason other
 than the worker's repair.
 
 Tested: not as a whole. The gateway suite, `integtest/gateway_test.sh`, on
 fake agents, finishes a migration with `--force` while the new side's disk
 node is stopped, after its plain finish is refused. The e2e suite's copy
-case cancels one with `--force` after its cutover (above). The e2e suite's
+case cancels one with `--force` after its cutover, in a RAID1 group whose
+other leg is in sync, as case 3 does, though it does not check whether the
+copy was whole: host0 writes before the migration, after its cutover and
+right after the forced cancel's reply. The reply came 6 seconds after the
+call, once the primary used the old side alone and had begun to copy the
+leg again; right after it the primary held no path to the new side; the
+worker cleared the mark 6 seconds later; md's check found the two legs
+equal, and every write read back. It passed in the lab on 2026-11-27. The e2e suite's
 react case, stage 10, runs what follows case 2, with the worker's own
 finish of a whole copy in place of a forced end: the new side's disk node
 goes silent, the primary cuts its path to the old side, and md fails the
@@ -3648,8 +3672,8 @@ leg's member while a host writes; then the worker finishes the migration,
 so that the leg keeps the gone new side alone, and repairs the leg with a
 fresh leg, no write failing. It passed in the lab on 2026-11-21. Not
 tested: the finish with no force of a whole copy whose old side's disk
-node is gone, a forced end of a copy that is not whole, the forced cancel
-of case 2, and cases 3 and 4.
+node is gone, a forced end of a copy known not to be whole, the forced
+cancel of case 2, and cases 4 and 5.
 
 ## Repair a leg by hand
 
@@ -5176,9 +5200,11 @@ Safe steps:
       and the deletes of its volume and of the pool are refused until then.
    5. Each migration: `dnvctl --sp '<pool name>' migr cancel --name <migration>`.
       Once a migration's cutover has started, the cancel is refused without
-      `--force`, and its refusal says so. Then cancel it with `--force`: the
-      pool's namespaces are gone and its thin devices are deleted next, so
-      the forced cancel loses nothing more.
+      `--force`, and its refusal says so. Then cancel it with `--force
+      --timeout 120`: the pool's namespaces are gone and its thin devices
+      are deleted next, so the forced cancel loses nothing more. Its answer
+      waits up to a minute for the primary to use the old side alone; a
+      `DEADLINE_EXCEEDED` that says the cancel is done is no failure here.
    6. Each thin device: `dnvctl --sp '<pool name>' td delete --name <td name>`.
       A thin device with a snapshot that is not made yet is refused, and
       the refusal names the snapshot: delete the snapshot first.
@@ -6012,7 +6038,7 @@ Safe steps:
    the node, and one past its cutover whose old side is on the node and
    whose copy is whole. If a finish there is still refused once you have
    run it again as [Ending a migration with
-   force](#ending-a-migration-with-force) says, that is its case 3: stop
+   force](#ending-a-migration-with-force) says, that is its case 4: stop
    and ask for help.
 4. For each RAID1 pool with a leg on the node, wait for its leg repairs, or
    start them yourself ([Repair a leg by hand](#repair-a-leg-by-hand)). A
@@ -6088,7 +6114,7 @@ When to stop: a group with no healthy leg ([the forced-start
 guide](#the-forced-start-guide)); a repair that does not start a few minutes
 after the thresholds above, or does not finish; a `no candidate` record that
 goes on once a disk node has room; a migration of step 3 that falls in case
-3 or 4 of [Ending a migration with force](#ending-a-migration-with-force).
+4 or 5 of [Ending a migration with force](#ending-a-migration-with-force).
 Ask for help.
 
 Tested: the e2e suite's react case kills a disk node's agent and removes its

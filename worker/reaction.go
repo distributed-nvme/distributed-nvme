@@ -287,6 +287,14 @@ const (
 	msgForcedStartKept    = "forced start kept"
 )
 
+// The records of the recopy clear (dnv-worker.md AR13; Log records), beside
+// the forced-start clear's: a clear that wrote, and a clear the step finds
+// due and does not make.
+const (
+	msgRecopyCleared = "recopy cleared"
+	msgRecopyKept    = "recopy kept"
+)
+
 // The "reason" attribute of `repair stage skipped`, `retired leg kept` and
 // `forced start kept`, beside a model.ErrPrecondition's own Reason with the
 // op that refused, and reasonOpFailed for any other failure of the op.
@@ -579,6 +587,18 @@ type reactionOps interface {
 		spId uint64,
 		spName string,
 		ref model.ForcedStartRef,
+	) (bool, uint64, error)
+	// clearRecopy is the recopy clear (AR13; MD6's ClearRecopy): it clears
+	// the recopy mark ref names, on the leg ref names in its group, unless
+	// the store no longer holds that mark as the pass's snapshot read it.
+	// It reports whether it wrote and the SpRev revision its STM committed.
+	clearRecopy(
+		ctx context.Context,
+		cid uint64,
+		shard uint32,
+		spId uint64,
+		spName string,
+		ref model.RecopyRef,
 	) (bool, uint64, error)
 	// lowerFutureErrEpochs is AR4's write for the clocks (MD6's
 	// LowerFutureErrEpochs): it writes now over every health epoch later
@@ -985,6 +1005,17 @@ func (o *modelReactionOps) clearForcedStart(
 	ref model.ForcedStartRef,
 ) (bool, uint64, error) {
 	return model.ClearForcedStart(ctx, o.cli, cid, shard, spId, spName, ref)
+}
+
+func (o *modelReactionOps) clearRecopy(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.RecopyRef,
+) (bool, uint64, error) {
+	return model.ClearRecopy(ctx, o.cli, cid, shard, spId, spName, ref)
 }
 
 func (o *modelReactionOps) lowerFutureErrEpochs(
@@ -2000,6 +2031,7 @@ func (w *spWorker) reactionPass(ctx context.Context) {
 	// operator force-starts a group at the levels where reactions stop; it
 	// is not the pass's one action either.
 	w.clearForcedStarts(ctx, p)
+	w.clearRecopies(ctx, p)
 	// dnv-worker.md CLD13: the latch of a clone whose copy is whole, a step
 	// of the pass at every sp_level too, since it only follows the
 	// primary's report; it is not the pass's one action either.
@@ -4975,6 +5007,132 @@ func (w *spWorker) clearGrpForcedStart(
 		return
 	}
 	w.stepAppliedAt(ctx, msgForcedStartCleared, revision, ids...)
+}
+
+// clearRecopies is the recopy clear (AR13), a step of the pass beside the
+// forced-start clear, at every sp_level and over the same groups in the same
+// order: each recopy mark (Leg.recopy_revision) of a group's leg_list leg
+// that the current primary's latest report shows done (recopyDone: the leg
+// copied again and in sync in an md-raid1 group of more than one leg, and
+// otherwise served by its own side alone) is
+// cleared through model.ClearRecopy, handed the group's parent and id, the
+// leg and the mark's revision as the snapshot read them, which the op checks
+// again in its STM. Reason: a mark that stayed would copy the leg again at
+// the primary's next agent restart, and while it stands a read can name the
+// leg; the clear raises SpRev, so the fan-out hands every cntlr the leg
+// without its mark (RW14). Its records follow the forced-start clear's:
+// nothing for a mark the report does not show done or an op that skips a
+// stale ref, `recopy kept` with clone_deleting or the op's error, and
+// `recopy cleared` with the revision its own STM committed. No clear is
+// the pass's one action (AR2).
+func (w *spWorker) clearRecopies(ctx context.Context, p *spPass) {
+	if p.info == nil {
+		return
+	}
+	for _, sliceId := range p.state.Conf.GetSliceIdList() {
+		slice, ok := p.state.Slices[sliceId]
+		if !ok {
+			continue
+		}
+		owner := []slog.Attr{slog.Uint64("slice_id", sliceId)}
+		for _, grp := range allGroups(slice) {
+			w.clearGrpRecopies(ctx, p, grp,
+				model.GrpParent{SliceId: sliceId}, false, owner)
+		}
+	}
+	for _, cloneName := range p.state.Conf.GetCloneNameList() {
+		clone, ok := p.state.Clones[cloneName]
+		if !ok || clone.GetMetaGrp() == nil {
+			continue
+		}
+		owner := []slog.Attr{
+			slog.String("clone_name", cloneName),
+			slog.Uint64("clone_id", clone.GetCloneId()),
+		}
+		w.clearGrpRecopies(ctx, p, clone.GetMetaGrp(),
+			model.GrpParent{CloneName: cloneName}, clone.GetDeleting(), owner)
+	}
+}
+
+// clearGrpRecopies is clearRecopies on one group, held by parent, which
+// owner names in the records; deleting says that parent is a deleting
+// clone.
+func (w *spWorker) clearGrpRecopies(
+	ctx context.Context,
+	p *spPass,
+	grp *pb.Group,
+	parent model.GrpParent,
+	deleting bool,
+	owner []slog.Attr,
+) {
+	copyAgain := isMdRaid1(p.state.Conf) && len(grp.GetLegList()) > 1
+	for _, leg := range grp.GetLegList() {
+		revision := leg.GetRecopyRevision()
+		if revision == 0 || !recopyDone(p, grp.GetGrpId(), leg.GetLegId(),
+			revision, copyAgain) {
+			continue
+		}
+		ids := withAttr(owner,
+			slog.Uint64("grp_id", grp.GetGrpId()),
+			slog.Uint64("leg_id", leg.GetLegId()),
+			slog.Uint64("mark_revision", revision),
+			slog.Uint64("cntlr_id", p.primaryId),
+			slog.Uint64("report_revision", p.infoRev),
+		)
+		if deleting {
+			w.stepSkipped(ctx, msgRecopyKept, reasonCloneDeleting, ids...)
+			continue
+		}
+		cleared, committed, err := w.reactor().ops.clearRecopy(
+			ctx, w.cid, w.shard, w.spId, w.desired.handle,
+			model.RecopyRef{
+				Parent:   parent,
+				GrpId:    grp.GetGrpId(),
+				LegId:    leg.GetLegId(),
+				Revision: revision,
+			},
+		)
+		if err != nil {
+			w.stepFailed(ctx, msgRecopyKept, err, ids...)
+			continue
+		}
+		if cleared {
+			w.stepAppliedAt(ctx, msgRecopyCleared, committed, ids...)
+		}
+	}
+}
+
+// recopyDone is AR13's test of one recopy mark against p.info, the current
+// primary's latest report, which must be of an observation made at the
+// mark's revision or later. For a leg the primary copies again (copyAgain,
+// an md-raid1 group of more than one leg): the group's reading names the
+// mark's revision as the recopy the primary ran on the leg
+// (leg_id_to_recopy_revision), so the primary's own fresh add of this mark
+// copied the leg (cnagent.md CN12), and md holds the leg in sync
+// (in_sync_leg_id_list), so the copy ended. Reason for the acted revision:
+// the leg read in sync before the recopy too, with its content as of the
+// cutover. For any other leg, which nothing copies: the leg's row
+// (leg_id_to_leg) reads RES_STATUS_OK with no reason, so its own side alone
+// serves it on the primary's node (RES_REASON_LEG_PATH_NOT_SOLE absent,
+// cnagent.md CN28), which is all the mark waits for there.
+func recopyDone(
+	p *spPass,
+	grpId, legId, revision uint64,
+	copyAgain bool,
+) bool {
+	if p.infoRev < revision {
+		return false
+	}
+	if !copyAgain {
+		row := p.info.GetLegIdToLeg()[legId]
+		return row.GetStatus() == pb.ResStatus_RES_STATUS_OK &&
+			row.GetReason() == pb.ResReason_RES_REASON_NONE
+	}
+	reading := p.info.GetGrpIdToGrpInfo()[grpId]
+	if reading.GetLegIdToRecopyRevision()[legId] != revision {
+		return false
+	}
+	return slices.Contains(reading.GetInSyncLegIdList(), legId)
 }
 
 // forcedStartDone is AR13's test of one mark on the group grpId against

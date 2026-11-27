@@ -869,11 +869,23 @@ which leaves md the moved leg to read from; the flag must still stand once
 the read is done and is cleared before the read is judged, so a read that
 fails leaves no flag behind. The fio stamp's namespace and thin device are
 then deleted. A second migration, once its cutover has started, is refused a
-plain cancel and ended by a forced one, its source serving again, the
-primary's path to it optimized, with the time from the cancel to that path
-logged, and the volume reading as before, since no host IO ran in between
-(`architecture.md`, Migrations); the case relies on leg repair leaving a
-two-sided leg alone (`dnv-worker.md` AR8). A third migration of the same
+plain cancel and ended by a forced one (`architecture.md`, Migrations, The
+forced cancel). host0 writes three one-stripe patterns of its own, each
+`SLICE_CNT` stripes after the last, so each lies in slice 0 and the leg's
+group at any slice count, over blocks setup's baseline and the clone's
+stamp mapped: one before the migration, one after its cutover, and one
+right after the forced cancel's answer, which comes once the primary uses
+the old side alone and is logged with its time. Right after the answer,
+read once with no wait, the primary holds no live path to the new side and
+its path to the old side is optimized. With raid1 the reply reads `copy_again` true and
+no `loss`, the worker clears the leg's recopy mark once the primary
+reports the leg copied again and in sync, md's check of the group's array
+on the primary then finds no sector that differs between the legs, and
+every pattern reads back; under `--redund none` the reply reads a `loss`,
+nothing copies the leg, and the pattern written after the cutover is only
+logged. The source serves again, the primary's path to it optimized, and
+the baseline digest is read again for the later steps; the case relies on leg
+repair leaving a two-sided leg alone (`dnv-worker.md` AR8). A third migration of the same
 leg (raid1 only, as a leg's one side lost with its guest takes the slice
 with it) loses its destination's whole guest in the middle of its copy,
 held back by the same bucket. Once its pieces apply, the copy moves only

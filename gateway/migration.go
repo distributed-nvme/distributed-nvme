@@ -2,6 +2,8 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -785,9 +787,10 @@ func (s *Server) FinishMigration(
 		// DN (model.EndMigrationIn; architecture.md, Metadata units). The
 		// write is the one the worker's finish runs too (dnv-worker.md AR8).
 		// Its errors are lost invariants, ABORTED (mapStmErr).
-		return model.EndMigrationIn(stm, opFinishMigration, sc.Cid,
+		_, _, err = model.EndMigrationIn(stm, opFinishMigration, sc.Cid,
 			sc.Shard(), req.GetSpName(), sc.Conf, req.GetMigrName(), migr,
-			false, sc.Cc)
+			false, false, sc.Cc)
+		return err
 	})
 	if err != nil {
 		return nil, mapStmErr(err)
@@ -796,17 +799,27 @@ func (s *Server) FinishMigration(
 }
 
 // CancelMigration is the CancelMigration of architecture.md, Migrations: the
-// mirror rollback of CreateMigration, in one STM.
+// mirror rollback of CreateMigration.
 //
-// It is a single transaction where FinishMigration needs two because it
-// answers a question no agent has to be consulted about: whatever the
-// destination has copied is thrown away, so there is nothing to prove. Once
-// the cutover has started the destination may serve and hold the only copy
-// of the leg's newest writes, so the cancel is refused then unless forced
+// One transaction decides it, as no agent has to prove anything for it:
+// whatever the destination has copied is thrown away. Once the cutover has
+// started the destination may serve and hold the only copy of the leg's
+// newest writes, so the cancel is refused then unless forced
 // (migrCancelAllowed). The source side returns to service on its next
 // SyncupSide; the destination DN sees its pointer disappear and tears the
 // stack down, including the migration's local bitmap files (dnagent.md SH7
 // and DN6).
+//
+// A forced cancel after the cutover does more (architecture.md,
+// Migrations, The forced cancel). Its write marks the leg to be copied
+// again in an md-raid1 group of more than one leg (model.EndMigrationIn),
+// as the old side then serves the leg's content as of the cutover. Before
+// the write, outside any transaction, it reads the primary's report for
+// the group's legs in sync (cancelLegsInSync), which only words the
+// answer's loss (cancelLoss). After the write it waits until the primary
+// uses the old side's path alone (waitOldSideServes), so a host write
+// after the answer lands on the old side; at the bound it answers
+// DEADLINE_EXCEEDED, the cancel committed.
 func (s *Server) CancelMigration(
 	ctx context.Context,
 	req *pb.CancelMigrationRequest,
@@ -822,9 +835,64 @@ func (s *Server) CancelMigration(
 	if err := validateName("migr_name", req.GetMigrName()); err != nil {
 		return nil, err
 	}
-	var migrId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
-		migrId = 0
+	// Phase 1, for a forced cancel after the cutover: the leg, its group
+	// and the primary, whose report says which legs of the group md holds
+	// in sync. Phase 1's refusals are the decision's own, which the
+	// transaction runs again.
+	var (
+		after       bool
+		phaseMigrId uint64
+		legId       uint64
+		srcSideId   uint64
+		grpId       uint64
+		tgt         grpReportTarget
+		hasPrimary  bool
+	)
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		after, hasPrimary, phaseMigrId = false, false, 0
+		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
+			req.GetSpRev())
+		if err != nil {
+			return err
+		}
+		migr, err := getMigration(stm, sc, req.GetMigrName())
+		if err != nil {
+			return err
+		}
+		if err := migrCancelAllowed(
+			req.GetMigrName(), migr, req.GetForce()); err != nil {
+			return err
+		}
+		phaseMigrId = migr.GetMigrId()
+		if migr.GetCutoverPending() {
+			return nil
+		}
+		slices, err := loadSlices(stm, sc.Cid, sc.Conf)
+		if err != nil {
+			return err
+		}
+		loc, ok := findSide(sc.Conf, slices, migr.GetSrcSideId())
+		if !ok {
+			return errAborted("migration %q: its source side %d is in no "+
+				"leg", req.GetMigrName(), migr.GetSrcSideId())
+		}
+		after = true
+		legId, grpId = loc.Leg.GetLegId(), loc.Grp.GetGrpId()
+		srcSideId = migr.GetSrcSideId()
+		tgt, hasPrimary, err = primaryTarget(stm, sc)
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	inSync, known := cancelLegsInSync(ctx, after && hasPrimary, tgt, grpId)
+	var (
+		migrId   uint64
+		revision uint64
+		marked   bool
+	)
+	err = s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+		migrId, revision, marked = 0, 0, false
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
 		if err != nil {
@@ -839,20 +907,224 @@ func (s *Server) CancelMigration(
 			req.GetMigrName(), migr, req.GetForce()); err != nil {
 			return err
 		}
+		// Phase 1 read the cutover started or pending; a migration that
+		// changed since, the cutover in between or another migration made
+		// under the name, is ABORTED, so the answer's words fit the write.
+		if migr.GetCutoverPending() == after ||
+			migr.GetMigrId() != phaseMigrId {
+			return errAborted("migration %q changed while the cancel read "+
+				"it; send the cancel again", req.GetMigrName())
+		}
 		// The destination's extents and its metadata units return to its DN
 		// and its pointer goes, which is the whole rollback: the source side
 		// was never touched (model.EndMigrationIn; architecture.md,
 		// Migrations; Metadata units). The write is the one the worker's
 		// cancel runs too (dnv-worker.md AR8). Its errors are lost
 		// invariants, ABORTED (mapStmErr).
-		return model.EndMigrationIn(stm, opCancelMigration, sc.Cid,
-			sc.Shard(), req.GetSpName(), sc.Conf, req.GetMigrName(), migr,
-			true, sc.Cc)
+		revision, marked, err = model.EndMigrationIn(stm, opCancelMigration,
+			sc.Cid, sc.Shard(), req.GetSpName(), sc.Conf, req.GetMigrName(),
+			migr, true, after, sc.Cc)
+		return err
 	})
 	if err != nil {
 		return nil, mapStmErr(err)
 	}
-	return &pb.CancelMigrationReply{MigrId: migrId}, nil
+	reply := &pb.CancelMigrationReply{MigrId: migrId, CopyAgain: marked}
+	if !after {
+		return reply, nil
+	}
+	reply.Loss = cancelLoss(marked, grpId, legId, inSync, known)
+	if err := s.waitOldSideServes(ctx, req, oldSideWait{
+		legId: legId, srcSideId: srcSideId, grpId: grpId,
+		revision: revision, recopy: marked && reply.Loss == "",
+		loss: reply.Loss,
+	}); err != nil {
+		return nil, err
+	}
+	return reply, nil
+}
+
+// cancelLegsInSync is a forced cancel's read of the primary's latest report
+// (GetCntlrInfo answers from the agent's observation and reads nothing of
+// the node): the legs of group grpId that md holds in sync
+// (GrpInfo.in_sync_leg_id_list), and whether the report answered with the
+// group's reading. ask false, a cancel before the cutover or a pool with no
+// primary, reads nothing.
+func cancelLegsInSync(
+	ctx context.Context,
+	ask bool,
+	tgt grpReportTarget,
+	grpId uint64,
+) ([]uint64, bool) {
+	if !ask {
+		return nil, false
+	}
+	var (
+		legs  []uint64
+		known bool
+	)
+	_ = withCnAgent(ctx, tgt.AddrPort,
+		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
+			reply, err := client.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+				ClusterId: tgt.ClusterId,
+				CnId:      tgt.CnId,
+				CntlrPointer: &pb.CntlrPointer{
+					SpId:    tgt.SpId,
+					CntlrId: tgt.CntlrId,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			info, ok := reply.GetCntlrInfo().GetGrpIdToGrpInfo()[grpId]
+			if ok {
+				legs, known = info.GetInSyncLegIdList(), true
+			}
+			return nil
+		})
+	return legs, known
+}
+
+// cancelLoss is a forced cancel's answer about the writes since the cutover
+// (CancelMigrationReply.loss): empty when it marked the leg to be copied
+// again and the primary's report held another leg of the group in sync;
+// otherwise why those writes are lost on the leg, or may be.
+func cancelLoss(
+	marked bool,
+	grpId uint64,
+	legId uint64,
+	inSync []uint64,
+	known bool,
+) string {
+	if !marked {
+		return fmt.Sprintf("group %d has no other leg to copy leg %d "+
+			"from: the writes since the cutover are lost on it", grpId,
+			legId)
+	}
+	if !known {
+		return fmt.Sprintf("the primary's report of group %d did not "+
+			"answer, so whether another leg is in sync is not known: the "+
+			"writes since the cutover are lost on leg %d unless one is",
+			grpId, legId)
+	}
+	for _, id := range inSync {
+		if id != legId {
+			return ""
+		}
+	}
+	return fmt.Sprintf("the primary's report held no other leg of group %d "+
+		"in sync: leg %d is copied again only once one is, and the writes "+
+		"since the cutover are lost on it unless one is", grpId, legId)
+}
+
+// oldSideWait is what a forced cancel's wait reads the primary's report
+// for: the leg and its old side, the group, the revision the cancel
+// committed, whether the primary is to copy the leg again beside another
+// leg in sync (recopy), and the reply's loss, which the bound's error
+// carries.
+type oldSideWait struct {
+	legId     uint64
+	srcSideId uint64
+	grpId     uint64
+	revision  uint64
+	recopy    bool
+	loss      string
+}
+
+// waitOldSideServes is a forced cancel's wait after its write (architecture.md,
+// Migrations, The forced cancel): until the pool's primary reports, at or
+// past the cancel's revision, the leg's row as RES_STATUS_OK with no reason
+// (leg_id_to_leg): the leg serves on the primary's node, and its one side,
+// the old side, is the only path to it there, which
+// RES_REASON_LEG_PATH_NOT_SOLE would deny (cnagent.md CN28), so the primary
+// writes the leg to the old side only; and, where the primary is to copy
+// the leg again beside another leg in sync, until the group's reading names
+// the cancel's revision as the recopy the primary began
+// (leg_id_to_recopy_revision, cnagent.md CN12), as md reads no more of the
+// leg's old bytes from then on. Each try resolves the primary again, as a
+// failover may move it, and reads its latest report; a pool with no primary,
+// a report that does not answer and one that does not show it yet try again
+// a second later, for at most Server.migrCancelWait. At the bound, or when
+// the caller's context ends first, it answers DEADLINE_EXCEEDED: the cancel
+// has committed, and the message names the revision and how to check the
+// path before any write, and carries the reply's loss.
+func (s *Server) waitOldSideServes(
+	ctx context.Context,
+	req *pb.CancelMigrationRequest,
+	w oldSideWait,
+) error {
+	wctx, cancel := context.WithTimeout(ctx, s.migrCancelWait)
+	defer cancel()
+	for {
+		if s.oldSideServes(wctx, req, w) {
+			return nil
+		}
+		select {
+		case <-wctx.Done():
+			msg := fmt.Sprintf("migration %q is cancelled at revision %d, "+
+				"but the primary does not yet use the old side %d of leg "+
+				"%d alone: before any write to the pool, check with "+
+				"`dnvctl cntlr inspect` that applied_revision is at least "+
+				"%d and leg_id_to_leg reads leg %d RES_STATUS_OK with no "+
+				"reason", req.GetMigrName(), w.revision, w.srcSideId,
+				w.legId, w.revision, w.legId)
+			if w.loss != "" {
+				msg += "; " + w.loss
+			}
+			return status.Error(codes.DeadlineExceeded, msg)
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// oldSideServes is one try of waitOldSideServes: the pool's primary, read
+// in a snapshot, and its latest report.
+func (s *Server) oldSideServes(
+	ctx context.Context,
+	req *pb.CancelMigrationRequest,
+	w oldSideWait,
+) bool {
+	var (
+		tgt grpReportTarget
+		ok  bool
+	)
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		sc, err := openSpRead(stm, req.GetClusterName(), req.GetSpName())
+		if err != nil {
+			return err
+		}
+		tgt, ok, err = primaryTarget(stm, sc)
+		return err
+	})
+	if err != nil || !ok {
+		return false
+	}
+	serves := false
+	_ = withCnAgent(ctx, tgt.AddrPort,
+		func(ctx context.Context, client pb.ControllerNodeAgentClient) error {
+			reply, err := client.GetCntlrInfo(ctx, &pb.GetCntlrInfoRequest{
+				ClusterId: tgt.ClusterId,
+				CnId:      tgt.CnId,
+				CntlrPointer: &pb.CntlrPointer{
+					SpId:    tgt.SpId,
+					CntlrId: tgt.CntlrId,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			info := reply.GetCntlrInfo()
+			row := info.GetLegIdToLeg()[w.legId]
+			serves = reply.GetRevision() >= w.revision &&
+				row.GetStatus() == pb.ResStatus_RES_STATUS_OK &&
+				row.GetReason() == pb.ResReason_RES_REASON_NONE
+			if serves && w.recopy {
+				serves = info.GetGrpIdToGrpInfo()[w.grpId].
+					GetLegIdToRecopyRevision()[w.legId] == w.revision
+			}
+			return nil
+		})
+	return serves
 }
 
 // GetMigration is the GetMigration of architecture.md, Migrations: one

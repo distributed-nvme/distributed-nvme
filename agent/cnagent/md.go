@@ -1074,14 +1074,15 @@ func mdFormatArgs(lead []string, rest ...string) []string {
 	return append(args, rest...)
 }
 
-// ZeroSuperblock wipes a member's md superblock, which only CN12's forced
-// start asks for (Md). mdadm refuses a member an array holds, a broken array
-// included. Named for the 1.2 format (mdFormatArgs), the zero removes only
-// that superblock, and fails on a member that carries none and on one whose
-// read fails. So the forced start zeroes only a member whose reading shows a
-// superblock, counts one it reads blank as zeroed, and reads each member back
-// after its zero (ReadMember), taking the zero as done only when the read
-// answers with no superblock (forceStartGroup).
+// ZeroSuperblock wipes a member's md superblock, which CN12's forced start
+// and its recopy ask for (Md). mdadm refuses a member an array holds, a
+// broken array included. Named for the 1.2 format (mdFormatArgs), the zero
+// removes only that superblock, and fails on a member that carries none and
+// on one whose read fails. So the forced start and the recopy zero only a
+// member whose reading shows a superblock and count one they read blank as
+// zeroed; the forced start also reads each member back after its zero
+// (ReadMember), taking the zero as done only when the read answers with no
+// superblock (forceStartGroup).
 func (m *Md) ZeroSuperblock(ctx context.Context, dev string) error {
 	return m.cmd.RunOk(ctx, "mdadm",
 		mdFormatArgs([]string{"--zero-superblock"}, dev)...)
@@ -1283,6 +1284,7 @@ func (s *CnAgentServer) ensureGroup(
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
 	dead map[uint64]bool,
+	recopies map[uint64]uint64,
 ) (
 	detail *MdDetail,
 	running bool,
@@ -1341,7 +1343,7 @@ func (s *CnAgentServer) ensureGroup(
 		return nil, false, grpRefusals{}, err
 	}
 	changed, refusals, err := s.reconcileMembers(
-		ctx, gp, detail, available, legRows, dead)
+		ctx, gp, detail, available, legRows, dead, recopies)
 	if err != nil {
 		// The array runs, and the build steps its md check over it all
 		// the same (stepMdCheck), as the pass last read it, but while the
@@ -2996,6 +2998,7 @@ func (s *CnAgentServer) reconcileMembers(
 	available map[uint64]bool,
 	legRows map[uint64]*pb.ResInfo,
 	dead map[uint64]bool,
+	recopies map[uint64]uint64,
 ) (bool, grpRefusals, error) {
 	// A Foreign array never gets here (ensureGroup), so every member has a
 	// dm name.
@@ -3008,7 +3011,9 @@ func (s *CnAgentServer) reconcileMembers(
 	// leaves the array exactly as it is: no fail, no put-back and no add
 	// this pass. The test is the same for every member that leaves — the
 	// member it asks for stays in leg_list, which this loop never fails —
-	// so one test guards each fail of the loop.
+	// so one test guards each fail of the loop. The recopy below fails a
+	// leg_list member, its own guard the copy source it tests, one leg a
+	// pass (recopyLegs).
 	if leaver := inSyncGuard(gp, detail, func(lp *legPlan) bool {
 		return available[lp.legId]
 	}); leaver != "" {
@@ -3069,11 +3074,54 @@ func (s *CnAgentServer) reconcileMembers(
 		}
 		delete(held, lp.name)
 	}
+	// The recopy (CN12): a leg a forced migration cancel marked leaves the
+	// array, if md holds it, and loses its md superblock, so the add loop
+	// below adds it fresh and md copies it whole from a member in sync.
+	fresh := make(map[string]bool)
+	for _, lp := range recopyLegs(gp, recopies, available, sources, held) {
+		if _, ok := held[lp.name]; ok {
+			if err := run(s.md.Fail, lp.path); err != nil {
+				return changed, grpRefusals{}, err
+			}
+			if err := run(s.md.Remove, lp.path); err != nil {
+				return changed, grpRefusals{}, err
+			}
+			delete(held, lp.name)
+		}
+		// The zero fails on a member that carries no superblock, as one
+		// an earlier process's recopy zeroed before it stopped, which
+		// counts as zeroed (ZeroSuperblock).
+		reading := s.md.ReadMember(ctx, lp.path)
+		if reading.Err != nil {
+			return changed, grpRefusals{}, reading.Err
+		}
+		if reading.Sb != nil {
+			changed = true
+			if err := s.md.ZeroSuperblock(ctx, lp.path); err != nil {
+				return changed, grpRefusals{}, err
+			}
+		}
+		fresh[lp.name] = true
+		recopies[lp.legId] = lp.leg.GetRecopyRevision()
+		slog.WarnContext(ctx, msgRecopy,
+			slog.Uint64("grp_id", gp.grpId),
+			slog.Uint64("leg_id", lp.legId),
+			slog.Uint64("recopy_revision", lp.leg.GetRecopyRevision()),
+			slog.String("member", lp.path))
+	}
 	arrayUuid := s.arrayUuidOnce(detail)
 	for _, lp := range gp.legs {
 		if _, ok := held[lp.name]; ok || !available[lp.legId] ||
 			gp.isBadLeg(lp.legId) ||
 			!hasCopySource(gp, held, sources, lp.name) {
+			continue
+		}
+		if fresh[lp.name] {
+			// Its superblock is gone, so the identity check has nothing
+			// to read, and the add is a fresh one.
+			if err := run(s.md.AddFresh, lp.path); err != nil {
+				return changed, refusals, err
+			}
 			continue
 		}
 		why, err := s.legListAddRefusal(ctx, gp, lp, arrayUuid)
@@ -3490,6 +3538,80 @@ func deadMembers(
 		}
 	}
 	return out
+}
+
+// msgRecopy is the record of a recopy's start (CN12, The recopy).
+const msgRecopy = "leg copied again after a forced migration cancel"
+
+// recopyDue is a cntlr's read of a group's recopy (CN12, The recopy): the
+// member name of the first leg the converge's recopy would take
+// (recopyLegs), with the read's availability (readAvailability), which the
+// verdict names under agent.LeftoverKindMdMember so the worker's re-send
+// brings that converge (CN30); "" for none, and with no running array.
+// The availability is read only when a leg carries a mark this incarnation
+// has not acted on.
+func (s *CnAgentServer) recopyDue(
+	ctx context.Context,
+	st *cntlrState,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	detail *MdDetail,
+	legRows map[uint64]*pb.ResInfo,
+) string {
+	if detail == nil {
+		return ""
+	}
+	due := false
+	for _, lp := range gp.legs {
+		revision := lp.leg.GetRecopyRevision()
+		due = due || (revision != 0 && st.recopies[lp.legId] != revision)
+	}
+	if !due {
+		return ""
+	}
+	available := s.readAvailability(ctx, plan, gp)
+	sources := func(lp *legPlan) bool {
+		return copySourceLeg(available[lp.legId], legRows[lp.legId])
+	}
+	legs := recopyLegs(gp, st.recopies, available, sources,
+		heldMembers(detail))
+	if len(legs) == 0 {
+		return ""
+	}
+	return legs[0].name
+}
+
+// recopyLegs are the legs of gp's leg_list a converge copies again (CN12,
+// The recopy): each carries a recopy mark (Leg.recopy_revision) whose
+// revision this incarnation has not acted on (recopies), is no bad leg of
+// an open repair, is available, and is served on this node by its own side
+// alone (legPlan.servingSide), so a fresh add copies onto the side the leg
+// keeps and never onto a cancelled migration's new side; and the array
+// holds another member in sync on a leg that is a copy source
+// (hasCopySource), from which md copies it whole. It names at most one leg
+// a pass: the copy source it tested must stay in the array, and a second
+// marked leg of the group, as two forced cancels leave, is tested again at
+// a later pass, once the first is back in sync, so the recopy never fails
+// the group's last member in sync.
+func recopyLegs(
+	gp *grpPlan,
+	recopies map[uint64]uint64,
+	available map[uint64]bool,
+	sources func(*legPlan) bool,
+	held map[string]MdMember,
+) []*legPlan {
+	for _, lp := range gp.legs {
+		revision := lp.leg.GetRecopyRevision()
+		if revision == 0 || recopies[lp.legId] == revision ||
+			gp.isBadLeg(lp.legId) || !available[lp.legId] ||
+			len(lp.sides) != 1 ||
+			lp.servingSide != lp.sides[0].GetSideId() ||
+			!hasCopySource(gp, held, sources, lp.name) {
+			continue
+		}
+		return []*legPlan{lp}
+	}
+	return nil
 }
 
 // hasCopySource reports whether a member other than name can feed the copy
@@ -4064,7 +4186,9 @@ func brokenArray(found *MdDetail) *MdDetail {
 // converge's member reconciliation and a read's putBackNames return. acted
 // is the revision of the group's mark whose forced start this incarnation
 // ran (actedMark), zero for none, which the reading carries for the sp
-// worker's clear (dnv-worker.md AR13).
+// worker's clear (dnv-worker.md AR13); recopied are the group's legs whose
+// recopy mark this incarnation acted on (recopiedLegs), which the worker's
+// clear of those marks reads.
 func reportGrpReading(
 	info *pb.CntlrInfo,
 	gp *grpPlan,
@@ -4072,16 +4196,18 @@ func reportGrpReading(
 	refusals grpRefusals,
 	acted uint64,
 	mdDone uint64,
+	recopied map[uint64]uint64,
 ) {
 	if detail == nil {
 		return
 	}
 	held := heldMembers(detail)
 	reading := &pb.CntlrInfo_GrpInfo{
-		Whole:               detail.Degraded == 0,
-		Refusal:             agent.CutAgentText(refusals.grp),
-		ForcedStartRevision: acted,
-		MdCheckDoneEpoch:    mdDone,
+		Whole:                 detail.Degraded == 0,
+		Refusal:               agent.CutAgentText(refusals.grp),
+		ForcedStartRevision:   acted,
+		MdCheckDoneEpoch:      mdDone,
+		LegIdToRecopyRevision: recopied,
 	}
 	legs := gp.legs
 	if gp.rep != nil {

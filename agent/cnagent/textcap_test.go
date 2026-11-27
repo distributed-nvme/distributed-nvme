@@ -61,7 +61,7 @@ func TestGroupReadingCutsItsTexts(t *testing.T) {
 		GrpIdToGrpInfo:    make(map[uint64]*pb.CntlrInfo_GrpInfo),
 		RepIdToRepairInfo: make(map[uint64]*pb.CntlrInfo_RepairInfo),
 	}
-	reportGrpReading(info, gp, detail, refusals, 0, 0)
+	reportGrpReading(info, gp, detail, refusals, 0, 0, nil)
 	textcapWantCut(t, "the group reading's refusal",
 		info.GetGrpIdToGrpInfo()[101].GetRefusal(), refusals.grp)
 	verdict := info.GetRepIdToRepairInfo()[7]
@@ -70,7 +70,7 @@ func TestGroupReadingCutsItsTexts(t *testing.T) {
 	textcapWantCut(t, "the repair verdict's waits", verdict.GetWaits(),
 		refusals.waits)
 	short := grpRefusals{grp: "leg 0xb carries another array's superblock"}
-	reportGrpReading(info, gp, detail, short, 0, 0)
+	reportGrpReading(info, gp, detail, short, 0, 0, nil)
 	if got := info.GetGrpIdToGrpInfo()[101].GetRefusal(); got != short.grp {
 		t.Errorf("a short refusal became %q", got)
 	}

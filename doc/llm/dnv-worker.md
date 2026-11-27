@@ -621,7 +621,9 @@ in theirs (AR8) — each a body staged into its caller's transaction, not an
 op, so it takes no expected revision, the gateway checking the token itself
 (`gateway.md` GW6); save `ForceStartGroup`, the body of the gateway's call
 of that name, which this worker never runs: its clear of the mark that op
-writes is `ClearForcedStart` (AR13); and save `SetGrpOperatorInCharge`, the
+writes is `ClearForcedStart` (AR13), and of the recopy mark
+`EndMigrationIn` writes for the gateway's forced cancel `ClearRecopy`
+(AR13); and save `SetGrpOperatorInCharge`, the
 body of `UpdateGroupOperatorInCharge`, which it never runs either: its pass
 reads the flag that op writes (AR8); and save `SetRetiredLegKeep`, the body
 of `UpdateRetiredLegKeep`, which it never runs either: its retire timer and
@@ -688,7 +690,8 @@ three epoch writes take an SP that exists with its id, at any level and
 while it is deleting, as the other epoch writes read their record whatever
 its pool's state. A clone parent being deleted is refused by every repair
 op, save the epoch writes, which accept it as their clone twins do, and
-the flip, `ClearForcedStart`, `MarkGroupsArrayMade`, `UpdateMdChecks`,
+the flip, `ClearForcedStart`, `ClearRecopy`, `MarkGroupsArrayMade`,
+`UpdateMdChecks`,
 `SetFenceLastLegs` and `SetNewLegsPartial`, which skip it:
 its group goes back with its repair and retired legs in CLD9's
 transaction. A repair or a retired
@@ -1136,6 +1139,13 @@ list; the flip, which reads the repair's key alone, and
   otherwise it clears the mark, bumps `SpRev` once, so the fan-out hands
   every cntlr the group without it, and returns that it cleared and the
   revision its bump wrote (AR13).
+* `ClearRecopy` takes a `RecopyRef` — the group's parent and id, the leg,
+  and the revision of the recopy mark the caller judged — and no expected
+  revision. It requires the any-level SP checks. It skips, and fails
+  nothing, a parent, a group or a leg that is gone, a clone parent
+  `deleting`, a ref of revision zero and a mark of another revision;
+  otherwise it clears the mark, bumps `SpRev` once, and returns that it
+  cleared and the revision its bump wrote (AR13).
 * `LatchCopiedClone` takes the clone's name and `clone_id` and no expected
   revision: the caller's proof is about that id, which no other clone ever
   carries. It refuses an SP that is gone, whose id changed or that is
@@ -5421,6 +5431,34 @@ pass wait a pass, as a stage move's does, and leg repair's create, which
 reads the mark in the pass's snapshot, still holds the group in that pass
 (AR8). A latched SP clears no mark: its drain deletes its groups.
 
+Right after it, over the same groups in the same order, the pass clears
+each recopy mark (`Leg.recopy_revision`, `architecture.md`, Migrations, The
+forced cancel) of a group's `leg_list` leg that the same report, of an
+observation made at the mark's revision or later, shows done. In an
+md-raid1 pool, for a group of more than one leg, done is the group's
+reading naming the mark's revision as the recopy the primary ran on the
+leg (`leg_id_to_recopy_revision`) and holding the leg in sync
+(`in_sync_leg_id_list`): the primary's own fresh add of this mark copied
+the leg, and the copy ended (`cnagent.md` CN12, The recopy). Reason for the
+acted revision: the leg read in sync before the recopy too, with its
+content as of the cutover. For any other leg, which nothing copies, done is
+the leg's row reading `RES_STATUS_OK` with no reason: its own side alone
+serves it on the primary's node (`RES_REASON_LEG_PATH_NOT_SOLE` absent,
+`cnagent.md` CN28), all the mark waits for there. The op,
+`model.ClearRecopy`, is handed the group's parent and id, the leg and the
+mark's revision, and clears only the mark they name, skipping a parent, a
+group or a leg that is gone, a deleting clone's, and a mark of another
+revision (MD6); it takes no revision token and raises `SpRev`. Its records
+follow the forced-start clear's: nothing for a mark the report does not
+show done or a ref the op skips, `recopy kept` with `clone_deleting` or the
+op's error, and `recopy cleared` naming the group, the leg, the mark's
+revision, the primary, its report's revision and the revision the op's own
+STM committed. Reason: a mark that stayed would copy the leg again at the
+primary's next agent restart, and while it stands each pass looks the leg
+up. A leg that leaves its group, as a repair's retired bad leg, takes its
+mark with it. The clear is no reaction and not the pass's one action
+(AR2).
+
 AR14. **Member add refusals.** For a live SP, right after AR11's stage
 moves and before AR3's suppression — so at every `sp_level` — the pass logs
 `member add refused` for each group, in ascending grp_id, whose reading in
@@ -6249,7 +6287,8 @@ op's name as `op` when the op refused the delete, or its error (AR12);
 `forced start cleared` a clear of a forced-start mark whose call wrote,
 with the revision its own STM committed, and `forced start kept` a clear
 AR13 finds due and does not make, with its reason, the op's name as `op`
-when the op refused it, or its error (AR13); `member add refused`, at
+when the op refused it, or its error (AR13); `recopy cleared` and `recopy
+kept`, the same two for a recopy mark (AR13); `member add refused`, at
 Warn, a group whose primary refuses a `leg_list` member's add, naming the
 group, the primary, its report's revision and the refusal's text (AR14);
 `future health epochs lowered`, at Warn, a write of the pass's clock over

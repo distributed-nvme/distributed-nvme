@@ -54,6 +54,15 @@ const (
 // migration — a slice, a side or a disk node record missing, two sides not
 // in one leg, or a stored cluster conf that fails its validation — which
 // the gateway answers ABORTED.
+//
+// A cancel after the migration's cutover (recopy, the gateway's forced
+// cancel) also marks the leg, Leg.recopy_revision set to the SpRev revision
+// this write commits: the old side then serves the leg's content as of the
+// cutover, and the primary reports whether that side alone serves the leg,
+// and, when the pool is md-raid1 and the leg's group holds another leg,
+// copies the leg whole from a member in sync (architecture.md, Migrations;
+// cnagent.md CN12, CN28). It returns the SpRev revision the write commits
+// and whether the mark asks for that copy.
 func EndMigrationIn(
 	s etcdutil.STM,
 	op string,
@@ -64,10 +73,11 @@ func EndMigrationIn(
 	migrName string,
 	migr *pb.Migration,
 	cancel bool,
+	recopy bool,
 	cc *pb.ClusterConf,
-) error {
+) (uint64, bool, error) {
 	if err := ValidateClusterConf(cc); err != nil {
-		return err
+		return 0, false, err
 	}
 	spId := conf.GetSpId()
 	var (
@@ -105,11 +115,11 @@ func EndMigrationIn(
 	}
 	found, err := findSide(dropId)
 	if err != nil {
-		return err
+		return 0, false, err
 	}
 	if !found {
-		return fmt.Errorf("migration %q %s side %d is in no leg", migrName,
-			what, dropId)
+		return 0, false, fmt.Errorf("migration %q %s side %d is in no leg",
+			migrName, what, dropId)
 	}
 	var dropped, kept *pb.Side
 	for _, side := range leg.GetSideList() {
@@ -126,7 +136,7 @@ func EndMigrationIn(
 	dstAddr := dropped.GetAddrPort()
 	if !cancel {
 		if kept == nil {
-			return fmt.Errorf(
+			return 0, false, fmt.Errorf(
 				"migration %q sides %d and %d are not in one leg",
 				migrName, migr.GetSrcSideId(), migr.GetDstSideId())
 		}
@@ -135,13 +145,13 @@ func EndMigrationIn(
 	ledger := newMigrLedger(s, cid, cc)
 	if err := ledger.release(dropped.GetAddrPort(), spId,
 		dropped.GetSideId(), grp.GetExtCnt()); err != nil {
-		return err
+		return 0, false, err
 	}
 	if err := ledger.releaseUnits(dstAddr, migr.GetMetaUnits()); err != nil {
-		return err
+		return 0, false, err
 	}
 	if err := ledger.flush(op); err != nil {
-		return err
+		return 0, false, err
 	}
 	sides := make([]*pb.Side, 0, len(leg.GetSideList()))
 	for _, side := range leg.GetSideList() {
@@ -150,6 +160,17 @@ func EndMigrationIn(
 		}
 	}
 	leg.SideList = sides
+	// STM.Put marshals at the call, so the revision goes into the mark
+	// before the slice is staged.
+	revision, err := bumpSpRevTo(s, op, shard, cid, spId)
+	if err != nil {
+		return 0, false, err
+	}
+	if cancel && recopy {
+		leg.RecopyRevision = revision
+	}
+	copyAgain := cancel && recopy && isMdRaid1(conf) &&
+		len(grp.GetLegList()) > 1
 	s.Del(MigrationKey(cid, spId, migrName))
 	for bmIdx := range uint32(LegacyMigrBmCnt) {
 		s.Del(LegacyMigrBitmapKey(cid, spId, migrName, bmIdx))
@@ -157,7 +178,7 @@ func EndMigrationIn(
 	conf.MigrNameList = removeName(conf.GetMigrNameList(), migrName)
 	s.Put(SliceKey(cid, spId, sliceId), slice)
 	s.Put(SpConfKey(cid, spName), conf)
-	return BumpSpRev(s, op, shard, cid, spId)
+	return revision, copyAgain, nil
 }
 
 // CancelMigration is the sp worker's cancel of the migration migrName of a
@@ -233,8 +254,11 @@ func endMigration(
 		case !cancel && migr.GetCutoverPending():
 			return fail(op, ReasonCutoverPending)
 		}
-		return EndMigrationIn(s, op, cid, shard, spName, conf, migrName,
-			migr, cancel, cc)
+		// The worker cancels only while the cutover is pending, which marks
+		// nothing (recopy false).
+		_, _, err = EndMigrationIn(s, op, cid, shard, spName, conf,
+			migrName, migr, cancel, false, cc)
+		return err
 	})
 }
 
@@ -320,4 +344,77 @@ func (l *migrLedger) flush(op string) error {
 		}
 	}
 	return nil
+}
+
+// opClearRecopy is the Op name of the sp worker's clear of a recopy mark.
+const opClearRecopy = "ClearRecopy"
+
+// RecopyRef names the recopy mark the sp worker clears (ClearRecopy): the
+// leg by its group's parent, the group's id and its own id, and the mark by
+// the revision it carried, which proves that the mark is still the one the
+// primary's report answered.
+type RecopyRef struct {
+	Parent   GrpParent
+	GrpId    uint64
+	LegId    uint64
+	Revision uint64
+}
+
+// ClearRecopy clears the recopy mark ref names (Leg.recopy_revision) once
+// the primary's report shows the recopy done: the group's reading names the
+// mark's revision as the recopy the primary ran and holds the leg in sync
+// (dnv-worker.md AR13). It reports whether it wrote and the revision its
+// STM committed, 0 when it wrote nothing, and raises SpRev when it writes,
+// so every cntlr is handed the leg without the mark: one that stayed would
+// copy the leg again at the next agent restart of the primary.
+//
+// It takes no expected revision and a pool at any level that is not being
+// deleted, as ClearForcedStart does. A stale ref is skipped, never refused:
+// a parent, a group or a leg that is gone, a clone being deleted, and a mark
+// that is gone or of another revision.
+func ClearRecopy(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref RecopyRef,
+) (bool, uint64, error) {
+	cleared, revision := false, uint64(0)
+	err := cli.RunSTM(ctx, func(s etcdutil.STM) error {
+		cleared, revision = false, 0
+		if _, err := loadSpConfAnyLevel(
+			s, opClearRecopy, cid, spName, spId,
+		); err != nil {
+			return err
+		}
+		holder, err := loadGrpHolder(s, opClearRecopy, cid, spId, ref.Parent)
+		if err != nil {
+			return nil
+		}
+		grp := holder.group(ref.GrpId)
+		if grp == nil || holder.deleting() {
+			return nil
+		}
+		var leg *pb.Leg
+		for _, l := range grp.GetLegList() {
+			if l.GetLegId() == ref.LegId {
+				leg = l
+			}
+		}
+		if leg == nil || ref.Revision == 0 ||
+			leg.GetRecopyRevision() != ref.Revision {
+			return nil
+		}
+		leg.RecopyRevision = 0
+		holder.put(s)
+		revision, err = bumpSpRevTo(s, opClearRecopy, shard, cid, spId)
+		cleared = err == nil
+		return err
+	})
+	if err != nil {
+		return false, 0, err
+	}
+	return cleared, revision, nil
 }

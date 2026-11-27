@@ -805,6 +805,31 @@ func (o *fakeReactionOps) clearForcedStart(
 	return true, o.spRev, nil
 }
 
+func (o *fakeReactionOps) clearRecopy(
+	ctx context.Context,
+	cid uint64,
+	shard uint32,
+	spId uint64,
+	spName string,
+	ref model.RecopyRef,
+) (bool, uint64, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.calls = append(o.calls, reactionCall{
+		op: "clear_recopy", sliceId: ref.Parent.SliceId,
+		cloneName: ref.Parent.CloneName, grpId: ref.GrpId,
+		badLegId: ref.LegId, now: ref.Revision,
+	})
+	if o.markErr != nil {
+		return false, 0, o.markErr
+	}
+	if o.markSkip {
+		return false, 0, nil
+	}
+	o.spRev++
+	return true, o.spRev, nil
+}
+
 func (o *fakeReactionOps) deleteRetiredLeg(
 	ctx context.Context,
 	cid uint64,

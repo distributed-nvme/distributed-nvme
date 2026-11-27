@@ -19,6 +19,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -62,12 +63,20 @@ type Server struct {
 	pb.UnimplementedGatewayServer
 
 	cli *etcdutil.Client
+	// migrCancelWait bounds a forced CancelMigration's wait for the primary
+	// to use the old side alone (waitOldSideServes):
+	// common.MigrCancelWaitSeconds, a field so a test can shorten it.
+	migrCancelWait time.Duration
 }
 
 // NewServer builds a Server over an existing etcd client. Run uses it; the
 // unit tests use it to drive handlers without a listener.
 func NewServer(cli *etcdutil.Client) *Server {
-	return &Server{cli: cli}
+	return &Server{
+		cli: cli,
+		migrCancelWait: time.Duration(common.MigrCancelWaitSeconds) *
+			time.Second,
+	}
 }
 
 // serverOptions is the option set Run's grpc.Server is built from, factored

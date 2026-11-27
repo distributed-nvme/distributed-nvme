@@ -486,6 +486,16 @@ type legPlan struct {
 	// leg whose path does not serve with no lookup of their own
 	// (readAvailable), nil where the loop took none or it did not answer.
 	readView *subsysView
+	// servingSide is, for a leg with one side and a recopy mark, that side's
+	// id when the pass's lookup of the leg found its controller alone
+	// serving the leg (subsysView.servingSide), zero otherwise: the recopy's test that a
+	// fresh add copies onto the leg's own side (CN12, The recopy). notSole
+	// is set where that lookup ran and found no such side, or did not
+	// answer: the leg row's RES_REASON_LEG_PATH_NOT_SOLE (markNotSole,
+	// CN28). legPathRows sets both, on both channels, before the leg row
+	// and the group steps read them.
+	servingSide uint64
+	notSole     bool
 }
 
 // repPlan is a group's repair as the cntlr's request carries it

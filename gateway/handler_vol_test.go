@@ -5123,6 +5123,10 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 	}
 	// The cutover has started, so only a forced cancel ends it
 	// (migrCancelAllowed).
+	// The forced cancel's answer waits for the primary's report to name
+	// the old side as the leg's serving side (The forced cancel).
+	fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
+		[]uint64{volDataLegA, volDataLegB}, volDataSideA, env.spRev()+1))
 	if _, err := env.srv.CancelMigration(
 		env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,
@@ -5144,13 +5148,20 @@ func TestFinishMigrationRefusesAPendingCutoverInPhaseTwo(t *testing.T) {
 // TestCancelMigrationAfterTheCutover pins the cancel's refusal once the
 // cutover has started (architecture.md, Migrations): the new side may hold
 // the only copy of the writes since, so a cancel without force is
-// FAILED_PRECONDITION and writes nothing, and a forced one is the same
-// rollback as one before the cutover, which
-// TestCancelMigrationIsTheExactMirror pins with the flag still set. The leg
-// gets its source back as its only side and dn-c ends as the fixture wrote
-// it, but for its revision.
+// FAILED_PRECONDITION and writes nothing. A forced one is the same rollback
+// as one before the cutover, which TestCancelMigrationIsTheExactMirror pins
+// with the flag still set, but for the mark it leaves on the leg: in this
+// md-raid1 group of two legs the leg is to be copied again, its
+// recopy_revision the revision the cancel committed, and the reply says so,
+// with no loss, as the primary's report holds the other leg in sync. The
+// answer comes once that report names the old side as the leg's serving
+// side (The forced cancel). The leg gets its source back as its only side
+// and dn-c ends as the fixture wrote it, but for its revision.
 func TestCancelMigrationAfterTheCutover(t *testing.T) {
 	env := newVolEnv(t)
+	agent := fsPrimary(env)
+	agent.setInfo(nil, nil, nil, cancelReport(
+		[]uint64{volDataLegA, volDataLegB}, volDataSideA))
 	sliceBefore := env.slice()
 	dnBefore := env.dn(volDnC)
 	created := volCreateMigration(env, "migr-a")
@@ -5169,6 +5180,10 @@ func TestCancelMigrationAfterTheCutover(t *testing.T) {
 			"FAILED_PRECONDITION naming the cutover", err)
 	}
 	env.wantNoWrite("the refused CancelMigration", before)
+	// The cancel commits at the next revision, which the primary's report
+	// names as the recopy it began.
+	agent.setInfo(nil, nil, nil, cancelReport(
+		[]uint64{volDataLegA, volDataLegB}, volDataSideA, env.spRev()+1))
 	reply, err := env.srv.CancelMigration(
 		env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,
@@ -5184,9 +5199,15 @@ func TestCancelMigrationAfterTheCutover(t *testing.T) {
 		t.Errorf("reply migr_id: got %d, want %d",
 			reply.GetMigrId(), created.GetMigrId())
 	}
-	if got := env.slice(); !proto.Equal(got, sliceBefore) {
-		t.Errorf("slice did not roll back:\n got %v\nwant %v",
-			got, sliceBefore)
+	if !reply.GetCopyAgain() || reply.GetLoss() != "" {
+		t.Errorf("reply copy_again %v loss %q, want true and none",
+			reply.GetCopyAgain(), reply.GetLoss())
+	}
+	want := proto.Clone(sliceBefore).(*pb.Slice)
+	cancelLegOf(t, want, volDataLegA).RecopyRevision = env.spRev()
+	if got := env.slice(); !proto.Equal(got, want) {
+		t.Errorf("slice did not roll back with the leg marked:\n got %v\n"+
+			"want %v", got, want)
 	}
 	if got := env.dn(volDnC); !proto.Equal(got, dnBefore) {
 		t.Errorf("dn-c did not roll back:\n got %v\nwant %v", got, dnBefore)
@@ -5196,6 +5217,187 @@ func TestCancelMigrationAfterTheCutover(t *testing.T) {
 	) {
 		t.Errorf("the migration record must be gone")
 	}
+}
+
+// TestForcedCancelWaitsForTheOldSide pins the forced cancel's wait (The
+// forced cancel): the answer comes only once the primary's report names the
+// old side as the leg's serving side, which here it does a little after the
+// cancel's write; with no such report it answers DEADLINE_EXCEEDED at the
+// bound, the cancel committed. And the loss the reply words from the
+// primary's report before the write: none with another leg in sync, a loss
+// with none, and a loss that says the report did not tell for a report
+// with no reading of the group.
+func TestForcedCancelWaitsForTheOldSide(t *testing.T) {
+	t.Run("the answer waits for the serving side", func(t *testing.T) {
+		env := newVolEnv(t)
+		agent := fsPrimary(env)
+		agent.setInfo(nil, nil, nil, cancelReport(
+			[]uint64{volDataLegA, volDataLegB}, 0))
+		volCreateMigration(env, "migr-a")
+		volCutover(env, "migr-a")
+		served := make(chan struct{})
+		revision := env.spRev() + 1
+		go func() {
+			time.Sleep(1500 * time.Millisecond)
+			agent.setInfo(nil, nil, nil, cancelReport(
+				[]uint64{volDataLegA, volDataLegB}, volDataSideA, revision))
+			close(served)
+		}()
+		reply, err := env.srv.CancelMigration(env.ctx, cancelForced(env))
+		if err != nil {
+			t.Fatalf("the forced cancel: %v", err)
+		}
+		select {
+		case <-served:
+		default:
+			t.Fatalf("the forced cancel answered before the old side " +
+				"served")
+		}
+		if !reply.GetCopyAgain() {
+			t.Errorf("the forced cancel did not mark the leg")
+		}
+	})
+	t.Run("the bound", func(t *testing.T) {
+		env := newVolEnv(t)
+		env.srv.migrCancelWait = 1500 * time.Millisecond
+		agent := fsPrimary(env)
+		agent.setInfo(nil, nil, nil, cancelReport(
+			[]uint64{volDataLegA, volDataLegB}, volDataSideB))
+		volCreateMigration(env, "migr-a")
+		volCutover(env, "migr-a")
+		_, err := env.srv.CancelMigration(env.ctx, cancelForced(env))
+		if status.Code(err) != codes.DeadlineExceeded ||
+			!strings.Contains(err.Error(), "is cancelled") {
+			t.Fatalf("the forced cancel with no serving side answered %v, "+
+				"want DEADLINE_EXCEEDED saying the cancel is done", err)
+		}
+		if env.exists(
+			model.MigrationKey(env.cid, volSpId, "migr-a"), &pb.Migration{},
+		) {
+			t.Errorf("the cancel at the bound did not commit")
+		}
+	})
+	for _, tc := range []struct {
+		name  string
+		setup func(env *volEnv, agent *fakeAgent)
+	}{
+		{"a report older than the cancel", func(env *volEnv,
+			agent *fakeAgent) {
+			agent.setInfo(nil, nil, nil, cancelReport(
+				[]uint64{volDataLegA, volDataLegB}, volDataSideA,
+				env.spRev()+1))
+			agent.mu.Lock()
+			agent.cntlrRevision = env.spRev()
+			agent.mu.Unlock()
+		}},
+		{"the recopy not yet begun", func(env *volEnv, agent *fakeAgent) {
+			agent.setInfo(nil, nil, nil, cancelReport(
+				[]uint64{volDataLegA, volDataLegB}, volDataSideA))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			env.srv.migrCancelWait = 1500 * time.Millisecond
+			agent := fsPrimary(env)
+			volCreateMigration(env, "migr-a")
+			volCutover(env, "migr-a")
+			tc.setup(env, agent)
+			_, err := env.srv.CancelMigration(env.ctx, cancelForced(env))
+			if status.Code(err) != codes.DeadlineExceeded {
+				t.Fatalf("the forced cancel answered %v, want "+
+					"DEADLINE_EXCEEDED at the bound", err)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		name   string
+		report *pb.CntlrInfo
+		want   string
+	}{
+		{"no other leg in sync",
+			cancelReport([]uint64{volDataLegA}, volDataSideA),
+			"held no other leg of group"},
+		{"no reading of the group", &pb.CntlrInfo{
+			LegIdToLeg: map[uint64]*pb.ResInfo{volDataLegA: {
+				ResName: "leg", Status: pb.ResStatus_RES_STATUS_OK}},
+		}, "did not answer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			agent := fsPrimary(env)
+			agent.setInfo(nil, nil, nil, tc.report)
+			volCreateMigration(env, "migr-a")
+			volCutover(env, "migr-a")
+			reply, err := env.srv.CancelMigration(env.ctx,
+				cancelForced(env))
+			if err != nil {
+				t.Fatalf("the forced cancel: %v", err)
+			}
+			if !reply.GetCopyAgain() ||
+				!strings.Contains(reply.GetLoss(), tc.want) {
+				t.Errorf("reply copy_again %v loss %q, want true and %q",
+					reply.GetCopyAgain(), reply.GetLoss(), tc.want)
+			}
+		})
+	}
+}
+
+// cancelReport is the primary's report a forced cancel reads: the data
+// group's legs md holds in sync, the data leg A's row, which reads OK with
+// no reason when servingSide is its old side, volDataSideA, OK with
+// RES_REASON_LEG_PATH_NOT_SOLE for another side, and is absent for zero
+// (cnagent.md CN28), and, given, the revision of the recopy the primary
+// began on leg A (cnagent.md CN12).
+func cancelReport(inSync []uint64, servingSide uint64,
+	recopy ...uint64) *pb.CntlrInfo {
+	info := &pb.CntlrInfo{
+		GrpIdToGrpInfo: map[uint64]*pb.CntlrInfo_GrpInfo{
+			volDataGrpId: {InSyncLegIdList: inSync},
+		},
+		LegIdToLeg: map[uint64]*pb.ResInfo{},
+	}
+	if len(recopy) > 0 {
+		info.GrpIdToGrpInfo[volDataGrpId].LegIdToRecopyRevision =
+			map[uint64]uint64{volDataLegA: recopy[0]}
+	}
+	switch servingSide {
+	case 0:
+	case volDataSideA:
+		info.LegIdToLeg[volDataLegA] = &pb.ResInfo{
+			ResName: "leg", Status: pb.ResStatus_RES_STATUS_OK}
+	default:
+		info.LegIdToLeg[volDataLegA] = &pb.ResInfo{
+			ResName: "leg", Status: pb.ResStatus_RES_STATUS_OK,
+			Reason: pb.ResReason_RES_REASON_LEG_PATH_NOT_SOLE}
+	}
+	return info
+}
+
+// cancelForced is the forced cancel of migr-a under the current token.
+func cancelForced(env *volEnv) *pb.CancelMigrationRequest {
+	env.t.Helper()
+	return &pb.CancelMigrationRequest{
+		ClusterName: env.cluster,
+		SpName:      volSpName,
+		SpRev:       env.token(),
+		MigrName:    "migr-a",
+		Force:       true,
+	}
+}
+
+// cancelLegOf is the leg legId of a slice's groups.
+func cancelLegOf(t *testing.T, slice *pb.Slice, legId uint64) *pb.Leg {
+	t.Helper()
+	for _, grp := range append(slice.GetMetaGrpList(),
+		slice.GetDataGrpList()...) {
+		for _, leg := range grp.GetLegList() {
+			if leg.GetLegId() == legId {
+				return leg
+			}
+		}
+	}
+	t.Fatalf("no leg %d in the slice", legId)
+	return nil
 }
 
 // TestCreateMigrationRefusals pins the error table of architecture.md,
@@ -5763,7 +5965,12 @@ func volTokenCases() []volTokenCase {
 			name: "CancelMigration",
 			call: func(env *volEnv, rev *pb.SpRev) error {
 				// The fixture's migration has no cutover pending, so the
-				// cancel needs force (migrCancelAllowed).
+				// cancel needs force (migrCancelAllowed), and its answer
+				// waits for the primary's report to name the old side as
+				// the leg's serving side (The forced cancel).
+				fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
+					[]uint64{volDataLegA, volDataLegB}, volDataSideA,
+					env.spRev()+1))
 				_, err := env.srv.CancelMigration(
 					env.ctx, &pb.CancelMigrationRequest{
 						ClusterName: env.cluster, SpName: volSpName,
@@ -6037,6 +6244,10 @@ func TestFinishMigrationRefusesAnotherMigrationInPhaseTwo(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	// The forced cancel's answer waits for the primary's report to name
+	// the old side as the leg's serving side (The forced cancel).
+	fsPrimary(env).setInfo(nil, nil, nil, cancelReport(
+		[]uint64{volDataLegA, volDataLegB}, volDataSideA, env.spRev()+1))
 	if _, err := env.srv.CancelMigration(
 		env.ctx, &pb.CancelMigrationRequest{
 			ClusterName: env.cluster,

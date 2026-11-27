@@ -774,11 +774,13 @@ proof that the copy finished and nothing else: a migration whose cutover
 has not started is refused with `--force` or without, and `migr cancel` is
 the way out (`architecture.md`, Migrations). `migr cancel` with `--force`
 sends `force` true, the only way to cancel once the cutover has started:
-the old side then serves its content as of the cutover, and what that
-costs, a leg md still counts whole and nothing copies again, and its one
-safe use after writes since the cutover, a source side gone for good in an
-md-raid1 group whose other leg md holds in sync, before the copy is whole,
-followed by the leg's repair, are `architecture.md`, Migrations.
+the old side then serves its content as of the cutover, in an md-raid1
+group of more than one leg the primary copies the leg again from a leg in
+sync, and the reply prints `copy_again` and `loss`, which says where the
+writes since the cutover are lost (`architecture.md`, Migrations, The
+forced cancel). The call answers once the primary uses the old side alone,
+which takes up to `MigrCancelWaitSeconds`, so it needs a `--timeout` above
+that, as the flag's help says.
 `migr get` prints the record
 as stored, its `cutover_pending` included (CT4), which tells whether a
 finish can succeed yet.

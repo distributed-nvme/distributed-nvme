@@ -2923,6 +2923,42 @@ the forced start (the forced start, above). "mdadm
 node a sweep stops is the one sysfs named — never the `CnMdDevName` link under
 "/dev/md", which depends on udev having run.
 
+**The recopy.** A forced migration cancel after the cutover marks the
+migration's leg (`Leg.recopy_revision`, `architecture.md`, Migrations, The
+forced cancel): its one side, the migration's source, serves the leg's
+content as of the cutover, which md counts whole. Every primary's pass
+looks such a leg up in its walk, on both channels, and reads whether its side alone
+serves it on this node (`legServingSide`, `subsysView.servingSide`): every
+live controller of the leg's subsystem has that side's address and one
+reads live and ANA optimized, and none of another address can take IO
+again (CN28 gives the leg row's reason). The converge copies the leg again
+(`recopyLegs`, in the member reconciliation), one leg of a group a pass:
+for a leg of
+an md-raid1 group's `leg_list` whose mark carries a revision this
+incarnation has not acted on (`cntlrState.recopies`), that is no bad leg
+of an open repair, is available, is served by its own side alone, and
+beside a member in sync on a leg that is a copy source (`hasCopySource`),
+it fails and removes the leg's member if md holds it, zeroes its md
+superblock where a reading shows one (a member read blank counts as
+zeroed), and adds the leg fresh (`Md.AddFresh`), so md copies it whole
+from that member; it logs `leg copied again after a forced migration
+cancel` and records the mark's revision. A second marked leg of the group,
+as two forced cancels leave, waits for a later pass, once the first is
+back in sync, so the recopy never fails the group's last member in sync. Both channels report that
+revision in the group's reading while the request's mark carries it
+(`GrpInfo.leg_id_to_recopy_revision`, `recopiedLegs`), which the worker's
+clear reads (`dnv-worker.md` AR13); each converge drops the memory of a
+leg whose request carries no mark or another revision (`keepRecopies`).
+A read names the member of a leg the converge would copy again, under
+`agent.LeftoverKindMdMember` (`recopyDue`, CN30), so the worker's re-send
+brings that converge once the leg's side alone serves it. Reason for the
+serving-side test: until the destination's controller is gone, a fresh add
+could copy onto the destination, which the cancel throws away; reason for
+the zero: a plain add after an agent restart between the remove and the
+add is then a whole copy too, never a re-add from the bitmap. The memory
+lives in this incarnation alone, so an agent restart copies the leg once
+more, which costs time and, beside a member in sync, loses nothing.
+
 **The md check.** The worker asks for md's check of one group at a time
 through the group's `md_check.request_epoch` (`dnv-worker.md` AR16). A
 group suits a check, from the request alone, while it has no repair, no
@@ -6211,7 +6247,20 @@ The rows, each with its `res_name` and what its probe checks:
   A leg whose subsystem's sweep disconnect is still in flight (CN10's
   disconnect registry) reports `RES_STATUS_ERROR` with the converge's own
   details and is not probed. On a standby, a walk or a lookup that did
-  not answer (CN10) reads `RES_STATUS_ERROR` naming the read.
+  not answer (CN10) reads `RES_STATUS_ERROR` naming the read. On the
+  primary, a leg with one side and a recopy mark (`Leg.recopy_revision`)
+  whose row reads `RES_STATUS_OK` carries `RES_REASON_LEG_PATH_NOT_SOLE`,
+  its status and details kept (`markNotSole`), while its side is not known
+  to be the only path to it on this node: a controller of its subsystem
+  that is not gone, deleting or dead has another address, as one that
+  reconnects can take IO again, no controller of its own reads live and
+  ANA optimized, or the lookup did not answer (CN12, The recopy); the
+  primary sets it on both channels, a standby, whose paths are not
+  optimized by design, never, and no health rule reads it. A forced migration cancel's
+  answer waits for the primary's row of the leg to read OK without it
+  (`architecture.md`, Migrations, The forced cancel). A leg with no mark
+  gets no such lookup: a primary's read does not look up a one-sided leg
+  whose row reads OK.
 * `side_id_to_path`, keyed by side id and named by the side's transport
   address and service id, joined by a colon: the path rows, one per side
   of each leg whose `side_list` holds two sides — a migration's (CN10) —
@@ -6337,8 +6386,11 @@ agent process saw run to its end (CN12, The md check), while the cntlr's request
 counts as delivered and carries that request, zero otherwise, which the
 worker's schedule ends the request on (`dnv-worker.md` AR16);
 `leg_id_to_bad_blocks`, the count of md's bad-block ranges on the member of
-each leg that has one or more (CN12, The md check); and
-`forced_start_revision`, the revision of the group's forced-start mark
+each leg that has one or more (CN12, The md check);
+`leg_id_to_recopy_revision`, for each leg whose recopy mark this agent
+process acted on, the mark's revision, while the request's mark carries it
+(CN12, The recopy), which the worker's clear reads (`dnv-worker.md` AR13);
+and `forced_start_revision`, the revision of the group's forced-start mark
 whose forced start this agent process ran its assembly for (the acted
 mark), while the cntlr's request counts as delivered (CN8) and carries a
 mark of that revision, zero otherwise, which the worker's clear asks for
@@ -6564,7 +6616,11 @@ pass and may run again, its pause over, and that of a slice whose metadata
 reads damaged once its mark reads gone (`nameThinChecksDue`, CN13, The
 needs-check mark), a name only a read gives, as the run ends in the
 background and the mark goes outside any pass: the converge the re-send
-brings runs the check again, or loads the pool. Nor does
+brings runs the check again, or loads the pool. It also names, under
+`agent.LeftoverKindMdMember`, the member of a leg the converge would copy
+again (`recopyDue`, CN12, The recopy), a name only a read gives, as the
+leg's side comes to serve it alone outside any pass, at the old side's
+disk node's syncup. Nor does
 it name the rows of
 a snapshot not yet created while a slice that is not deferred lacks its thin
 device, or the read of one does not answer (`snapsLackingADevice`): a

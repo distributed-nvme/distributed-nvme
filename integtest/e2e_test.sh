@@ -5499,6 +5499,38 @@ md_sync_speed() {
 	md_sync_read "$1"
 }
 
+# md_check_count <dm name> runs md's check over the array that holds the dm
+# device <dm name> as a member and prints, once the check has ended, how
+# many sectors it found differ between the members: "mismatch=<n>"
+# (md/mismatch_cnt). md refuses a check while another sync runs, so a
+# refused write is tried again each half second for up to 60 s, and the
+# check's end is waited for for up to 300 s. It fails, saying so, on an
+# array that is not there and on either wait running out.
+md_check_count() {
+	local where node dmk dir i a
+	where=$(md_member_of "$1") || return 1
+	read -r node dmk <<<"$where"
+	dir=/sys/block/$node/md
+	for i in $(seq 1 120); do
+		echo check >"$dir/sync_action" 2>/dev/null && break
+		[ "$i" -lt 120 ] || {
+			echo "md_check_count: md refused a check of $node for 60 s" >&2
+			return 1
+		}
+		sleep 0.5
+	done
+	for i in $(seq 1 600); do
+		sleep 0.5
+		a=$(cat "$dir/sync_action") || return 1
+		if [ "$a" = idle ]; then
+			echo "mismatch=$(cat "$dir/mismatch_cnt")"
+			return 0
+		fi
+	done
+	echo "md_check_count: the check of $node had not ended after 300 s" >&2
+	return 1
+}
+
 # md_array_state <dm name> prints the md/array_state of the array that holds
 # the dm device <dm name> as a member, md's own word for whether the array
 # runs (cnagent.md CN12 names the states that do), or "none" when no array
@@ -20163,11 +20195,56 @@ copy_migr_discarded() { # <v> <k> <migr id>
 # out of room, not that the rule was waived. A run with the copy case always
 # has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
+# COPY_FC_TIMEOUT is the --timeout of copy step 4's forced cancel, whose
+# answer waits up to common.MigrCancelWaitSeconds for the primary to use the
+# old side alone (architecture.md, Migrations, The forced cancel).
+COPY_FC_TIMEOUT=120
+# The forced cancel proof's three patterns are one stripe of the pool each
+# ($STRIPE_SIZE bytes), pattern n at (n - 1) x SLICE_CNT stripes: dm-striped
+# maps chunk c of a volume to slice c mod slice_cnt, so each lands in slice
+# 0, whose first data group is $COPY_GRP0, at any slice count, as react's
+# strided writes do (host_write_range). Setup's baseline and the clone's
+# stamp mapped those blocks, so each write lands on blocks of the leg's
+# group the pool already maps.
+COPY_FC_SHA=()
+
+# copy_fc_dd <what> runs one dd on host0 over $TD0's device, watched, as
+# host_write_range and host_sha_range run theirs: no direct flag, the write
+# with conv=fsync and a sync after it.
+copy_fc_dd() {
+	ssh_host_watched 0 "$1"
+}
+
+# copy_fc_write <n> <what> is one write of copy step 4's forced cancel proof:
+# a fresh one-stripe pattern on host0, written over $TD0 at
+# (<n> - 1) x SLICE_CNT stripes; its digest goes to COPY_FC_SHA[<n>].
+copy_fc_write() {
+	local n=$1 dev pat sha
+	dev=$(host_dev "$UUID1")
+	pat="$WORK/fc-pattern$n"
+	ssh_host 0 "dd if=/dev/urandom of=$pat bs=$STRIPE_SIZE count=1 conv=fsync status=none" ||
+		die "host0: making $pat failed"
+	sha=$(ssh_host 0 "sha256sum <$pat | cut -d' ' -f1") ||
+		die "host0: digesting $pat failed"
+	copy_fc_dd "dd if=$pat of=$dev bs=$STRIPE_SIZE count=1 seek=$(((n - 1) * SLICE_CNT)) conv=fsync status=none && sync"
+	COPY_FC_SHA[n]=$sha
+	log "  host0 wrote pattern $n ($sha) over $TD0 at stripe" \
+		"$(((n - 1) * SLICE_CNT)), $2"
+}
+
+# copy_fc_mark_gone <leg id> holds once `sp get` shows the leg with no
+# recopy mark (Leg.recopy_revision): the worker clears it once the primary
+# reports the leg copied again and in sync (dnv-worker.md AR13).
+copy_fc_mark_gone() {
+	sp_refresh
+	[ "$(sp_field "[$COPY_GRP0.leg_list[] | select(.leg_id == \"$1\")][0].recopy_revision // \"0\"")" = 0 ]
+}
+
 copy_migration() {
 	stage 04 "a stamp, migr create under a cap, the cutover, the worker's bitmap read, finish, the stamp read back — then a second one, cancelled after its cutover"
 	local gid legid sideid saddr dstside dstaddr dstvm before_addrs before_vms
 	local v k srcv srck legnqn straddr strsvcid dsttraddr dsttrsvcid t0
-	local pieces det frac srctraddr srctrsvcid tcut
+	local pieces det frac srctraddr srctrsvcid tcut m1addr m1svc m1state
 
 	sp_refresh
 	sp_read_roles
@@ -20457,7 +20534,10 @@ copy_migration() {
 
 	# The rollback. The destination side of the FIRST migration is now the
 	# leg's only side, so it is the source of the second — which proves that
-	# a migrated-onto side is an ordinary side.
+	# a migrated-onto side is an ordinary side. The forced cancel's proof
+	# writes three patterns: one before the migration, one after its cutover
+	# and one right after the cancel's answer (copy_fc_write).
+	copy_fc_write 1 "before the second migration"
 	ctl_ok migr create --name "$MIGR1" --src-side "$dstside"
 	MIGR1_ID=$(jq_of "$CTL_OUT" '.migr_id')
 	case "$MIGR1_ID" in
@@ -20474,18 +20554,56 @@ copy_migration() {
 	# new side may serve and hold the only copy of the writes since, so the
 	# gateway refuses a cancel then, and only a forced one ends the
 	# migration, the old side serving its content as of the cutover
-	# (architecture.md, Migrations). No host IO runs between the create and
-	# the forced cancel, so the content is the same, which check_sha0 below
-	# reads. The forced cancel is timed until the primary's path to the old
-	# side is optimized again.
+	# (architecture.md, Migrations, The forced cancel). Pattern 2 lands
+	# after the cutover, on the new side and, in a raid1 pool, the group's
+	# other leg. The forced cancel's answer waits until the primary uses the
+	# old side alone, so pattern 3, written right after it, lands on the old
+	# side; in a raid1 pool the primary then copies the leg again from its
+	# other leg, so every pattern reads back, and md's check of the array
+	# finds the legs equal (copy_fc_check). Under --redund none nothing
+	# copies the leg, and the reply says pattern 2's loss.
 	MIGR_HYD_LAST=""
 	wait_until "$WAIT_PROVISION" \
 		"the worker to start the cutover of migration $MIGR1" \
 		migr_cutover_started "$MIGR1"
+	copy_fc_write 2 "after the second migration's cutover"
+	# The new side's address, which the primary must no longer serve the leg
+	# through once the forced cancel answers.
+	sp_refresh
+	m1addr=$(sp_field "[$COPY_GRP0.leg_list[0].side_list[] | select(.side_id != \"$dstside\")][0].nvme_tr_conf.tr_addr")
+	m1svc=$(sp_field "[$COPY_GRP0.leg_list[0].side_list[] | select(.side_id != \"$dstside\")][0].nvme_tr_conf.tr_svc_id")
+	case "$m1addr" in
+	'' | null) die "migration $MIGR1's new side has no address in sp get" ;;
+	esac
 	ctl_fail FAILED_PRECONDITION migr cancel --name "$MIGR1"
 	t0=$SECONDS
-	ctl_ok migr cancel --name "$MIGR1" --force
+	ctl_ok migr cancel --name "$MIGR1" --force --timeout "$COPY_FC_TIMEOUT"
+	log "  the forced cancel answered $((SECONDS - t0)) s after it was sent:" \
+		"$CTL_OUT"
+	# Read once, with no wait, right after the answer: the primary holds no
+	# live path to the new side, and its path to the old side is optimized
+	# (architecture.md, Migrations, The forced cancel).
+	m1state=$(cn_path_field "$PRIMARY_CN" "$legnqn" "$m1addr" "$m1svc" State)
+	log "  right after the answer cn$PRIMARY_CN's path to the new side" \
+		"$m1addr:$m1svc reads '$m1state'"
+	case "$m1state" in
+	live | unread | '') die "right after the forced cancel's answer cn$PRIMARY_CN's path to the new side $m1addr:$m1svc reads '$m1state', want none or not live" ;;
+	esac
+	cn_ana_is "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized ||
+		die "right after the forced cancel's answer cn$PRIMARY_CN's path to the old side $straddr:$strsvcid reads '$ANA_LAST', want optimized"
+	copy_fc_write 3 "right after the forced cancel's answer"
 	assert_field "$CTL_OUT" '.migr_id' "$MIGR1_ID" "CancelMigrationReply.migr_id"
+	if [ "$REDUND" = raid1 ]; then
+		assert_eq "$(jq_of "$CTL_OUT" '.copy_again // false')" true \
+			"the forced cancel marks the leg to be copied again"
+		assert_eq "$(jq_of "$CTL_OUT" '.loss // ""')" "" \
+			"the forced cancel beside a leg in sync says no loss"
+	else
+		assert_eq "$(jq_of "$CTL_OUT" '.copy_again // false')" false \
+			"under --redund $REDUND nothing copies the leg again"
+		assert_ne "$(jq_of "$CTL_OUT" '.loss // ""')" "" \
+			"under --redund $REDUND the reply says the writes since the cutover are lost"
+	fi
 	cn_wait_ana "$PRIMARY_CN" "$legnqn" "$straddr" "$strsvcid" optimized
 	log "  a forced cancel after the cutover: the old side serves again" \
 		"$((SECONDS - t0)) s after the cancel"
@@ -20500,8 +20618,57 @@ copy_migration() {
 
 	# The same wait, for the same reason: the cancel only removed the
 	# record, and the DN's next syncup is what puts the namespace back in the
-	# optimized group (above, timed).
-	check_sha0 "after a migration was cancelled after its cutover"
+	# optimized group (above, timed). The forced cancel's patterns changed
+	# the volume's first stripe, so copy_fc_check reads them and the rest of
+	# the first $BASELINE_MIB MiB, and then SHA0 again.
+	copy_fc_check "$legid"
+}
+
+# copy_fc_check <leg id> is the end of copy step 4's forced cancel proof. In
+# a raid1 pool: the recopy mark goes, as the worker clears it once the
+# primary reports the leg copied again and in sync (dnv-worker.md AR13),
+# md's check of the group's array on the primary then finds no sector that
+# differs between the legs, and every pattern reads back. Under --redund
+# none: patterns 1 and 3 read back, and pattern 2's place is logged. Either
+# way SHA0 is read again from the device for the later steps, as the
+# patterns changed the volume's first stripes.
+copy_fc_check() {
+	local legid=$1 stay stayname out dev n sha rc=0
+	if [ "$REDUND" = raid1 ]; then
+		wait_until "$WAIT_PROVISION" \
+			"the primary to copy leg $legid again and the worker to clear its mark" \
+			copy_fc_mark_gone "$legid"
+		stay=$(sp_field "[$COPY_GRP0.leg_list[] | select(.leg_id != \"$legid\")][0].leg_id")
+		case "$stay" in
+		'' | *[!0-9]* | 0) die "the group's other leg has leg_id '$stay'" ;;
+		esac
+		stayname=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$stay")
+		out=$(helper_cn "$PRIMARY_CN" md_check_count "$stayname") ||
+			die "cn$PRIMARY_CN: md's check of the group's array failed: $out"
+		assert_eq "$out" "mismatch=0" \
+			"md's check after the recopy finds the legs of the group equal"
+	fi
+	dev=$(host_dev "$UUID1")
+	host_drop_caches 0 >/dev/null || rc=$?
+	host_watch_verdict "$rc" 0 "the cache drop before the forced cancel's reads" ||
+		die "host0: the cache drop before the forced cancel's reads failed"
+	for n in 1 2 3; do
+		sha=$(copy_fc_dd "dd if=$dev bs=$STRIPE_SIZE count=1 skip=$(((n - 1) * SLICE_CNT)) status=none | sha256sum | cut -d' ' -f1") ||
+			die "host0: reading pattern $n's place on $TD0 failed"
+		if [ "$REDUND" != raid1 ] && [ "$n" = 2 ]; then
+			log "  pattern 2, written after the cutover, reads $sha under" \
+				"--redund $REDUND (written ${COPY_FC_SHA[n]})"
+			continue
+		fi
+		assert_eq "$sha" "${COPY_FC_SHA[n]}" \
+			"pattern $n reads back after the forced cancel"
+	done
+	sha=$(host_sha_range 0 "$dev" "$BASELINE_MIB") || rc=$?
+	host_watch_verdict "$rc" 0 "the read of the first $BASELINE_MIB MiB of $dev" ||
+		die "host0: reading the first $BASELINE_MIB MiB of $dev failed"
+	assert_eq "${#sha}" 64 "the digest after the forced cancel's patterns is 64 hex digits"
+	SHA0=$sha
+	log "  SHA0 is read again from $dev after the forced cancel's patterns: $SHA0"
 }
 
 # ---------------------------------------------------------------------------

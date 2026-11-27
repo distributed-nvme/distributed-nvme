@@ -172,6 +172,9 @@ func widestCounts() map[protoreflect.FullName]int {
 		"CntlrInfo.GrpInfo.leg_id_to_bad_blocks": common.MaxAllocLegPerGrp + 1,
 		// The slots of the members md holds in sync: the in-sync list's legs.
 		"CntlrInfo.GrpInfo.in_sync_leg_id_to_slot": common.MaxAllocLegPerGrp + 1,
+		// The recopies the primary ran: at most one per leg of the group's
+		// leg_list.
+		"CntlrInfo.GrpInfo.leg_id_to_recopy_revision": common.MaxAllocLegPerGrp,
 		// The new legs of a repair md holds: one per repair.
 		"CntlrInfo.RepairInfo.held_new_leg_id_list": 1,
 		// The counters an inspect call reads (cnagent.md CN23): an entry per

@@ -218,37 +218,27 @@ always sends a piece's position.
   copy seen whole, and, in a RAID1 group whose other leg md holds in sync,
   to end the migration toward a disk node that is gone for good, so that a
   repair replaces the leg; not tested as a whole.
-- **A forced migration cancel after the cutover.** A cancel after the
-  cutover is refused unless forced, as the new side may hold the only copy
-  of the leg's new writes. With force the old side serves its content as
-  of the cutover: the leg loses every write since, and blocks first mapped
-  since read old bytes of the old side's extents, possibly another pool's.
-  In a group of more than one leg the other legs hold those writes, but md
-  does not know this leg is behind and counts it whole, so reads can
-  return its old bytes. No call makes md copy the leg again: a repair is
-  refused for a leg with no health epoch, and a member that md failed when
-  the leg went back to its old side is added back from md's record of the
-  regions written while it was out, which holds none of these. State: fix
-  decided for a group with another leg in sync, where md will copy the leg
-  again after a forced cancel, a few seconds of old reads staying until
-  the primary's next converge; accepted for a group with no other leg in
-  sync, where the loss is the one the operator asks for. Until then this
-  loss comes only from a cancel that the operator forces. The
-  call also returns before the primary stops using the new side: until the
-  primary has taken the cancel, and dropped its path to the new side with
-  it, a write can still land on the new side and is then lost with it, in
-  a group with no other leg in sync, with no error; this part is read from
-  dnv's code and the kernel's, not seen in the lab. State of this part:
-  fix decided: the call will wait, up to a time limit, until the primary
-  uses the old side's path. Procedure written,
+- **A forced migration cancel after the cutover loses the writes since,
+  where no other leg holds them.** A cancel after the cutover is refused
+  unless forced, as the new side may hold the only copy of the leg's new
+  writes. With force the old side serves its content as of the cutover. In
+  a RAID1 group with another leg in sync, the primary takes the leg out of
+  its md array and adds it back fresh, so md copies the whole leg from the
+  other leg; until the copy begins, for a few seconds, a read can return
+  old bytes with no error, and the call's answer waits for that start, so
+  hosts kept stopped until the answer read nothing old. In a group with no
+  other leg in sync, and in a pool without RAID, the leg loses every write
+  since the cutover, and blocks first mapped since read old bytes of the
+  old side's extents, possibly another pool's; the call's answer says so
+  (`loss`). The call answers only once the primary uses the old side's
+  path alone, or with an error after a minute, so a write after its answer
+  lands on the old side. State: accepted, as the loss is the one the
+  operator asks for. Procedure written,
   [the operations doc](operations.md#ending-a-migration-with-force): a
-  forced cancel loses nothing when nothing writes to the pool from the
-  cutover until the primary has taken the cancel, which the operations doc
-  says how to see, and after writes its one safe use is in a RAID1 group whose
-  other leg md holds in sync, when the old side's disk node is gone for
-  good and the copy is not whole, so that a repair replaces the leg. A copy
-  that is whole is finished with no force instead, since the gateway asks
-  only the new side's disk node for the proof.
+  copy that is whole is finished with no force instead, since the gateway
+  asks only the new side's disk node for the proof, and a forced cancel
+  after writes is for a RAID1 group with another leg in sync, or for a
+  copy whose loss the operator accepts.
 - **An etcd restore over a migration's cutover since the backup.** Silent.
   The restore can make a leg's old side serve again beside its new one,
   and a block first written since the cutover can then read another pool's

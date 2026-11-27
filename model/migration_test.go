@@ -154,3 +154,53 @@ func TestWorkerMigrationEnds(t *testing.T) {
 		})
 	}
 }
+
+// TestClearRecopy pins the recopy clear (dnv-worker.md AR13): it clears the
+// mark the ref names, in one SpRev bump, and returns the revision it
+// committed; a ref of another revision, of a leg or a group that is gone,
+// of a leg with no mark, and a ref of revision zero skip, writing nothing.
+func TestClearRecopy(t *testing.T) {
+	env := newOpsEnv(t)
+	slice := env.slice()
+	leg := slice.GetDataGrpList()[0].GetLegList()[0]
+	leg.RecopyRevision = 7
+	mustPut(t, env.cli, SliceKey(env.cid, opsSpId, opsSliceId), slice)
+	live := RecopyRef{Parent: opsSliceParent, GrpId: opsDataGrpId,
+		LegId: leg.GetLegId(), Revision: 7}
+	otherRev, goneLeg, goneGrp, noMark, zero := live, live, live, live, live
+	otherRev.Revision = 8
+	goneLeg.LegId = 9999
+	goneGrp.GrpId = 9999
+	noMark.LegId = slice.GetDataGrpList()[0].GetLegList()[1].GetLegId()
+	zero.Revision = 0
+	for name, r := range map[string]RecopyRef{
+		"another revision":     otherRev,
+		"a leg that is gone":   goneLeg,
+		"a group that is gone": goneGrp,
+		"a leg with no mark":   noMark,
+		"revision zero":        zero,
+	} {
+		before := env.storeRev()
+		cleared, revision, err := ClearRecopy(env.ctx, env.cli, env.cid,
+			opsShard, opsSpId, opsSpName, r)
+		if err != nil || cleared || revision != 0 {
+			t.Errorf("%s: ClearRecopy = %v, %d, %v, want a skip", name,
+				cleared, revision, err)
+		}
+		if got := env.storeRev(); got != before {
+			t.Errorf("%s: a skipped clear wrote", name)
+		}
+	}
+	revBefore := env.spRev()
+	cleared, revision, err := ClearRecopy(env.ctx, env.cli, env.cid,
+		opsShard, opsSpId, opsSpName, live)
+	if err != nil || !cleared || revision != revBefore+1 ||
+		env.spRev() != revision {
+		t.Fatalf("ClearRecopy = %v, %d, %v, SpRev %d, want a clear at %d",
+			cleared, revision, err, env.spRev(), revBefore+1)
+	}
+	if got := env.slice().GetDataGrpList()[0].GetLegList()[0].
+		GetRecopyRevision(); got != 0 {
+		t.Fatalf("the clear left the mark at revision %d", got)
+	}
+}

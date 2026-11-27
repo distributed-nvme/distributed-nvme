@@ -257,6 +257,18 @@ type cntlrState struct {
 	// (mdCheckDone). It is read and written under this cntlr's object lock
 	// or the node write lock, as forcedStarts is.
 	mdChecks map[uint64]mdCheckRun
+	// recopies holds, per leg id, the revision of the recopy mark
+	// (Leg.recopy_revision) whose recopy this incarnation ran: the leg's
+	// member failed, removed, its md superblock zeroed and the leg added
+	// fresh (CN12, The recopy). In memory only: an agent restart forgets
+	// it, and the next converge copies the leg once more, which a member in
+	// sync makes cost time alone. Every converge drops the entry of a leg
+	// whose request carries no mark or a mark of another revision
+	// (keepRecopies); both channels report an entry while the request's
+	// mark carries its revision (recopiedLegs). It is read and written
+	// under this cntlr's object lock or the node write lock, as
+	// forcedStarts is.
+	recopies map[uint64]uint64
 	// thinChecks holds, per slice id, the background check of the slice's
 	// thin-pool metadata this incarnation started because the metadata
 	// carries dm-thin's needs-check mark (CN13, The needs-check mark;
@@ -501,6 +513,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		tornTds:      make(map[uint64]bool),
 		forcedStarts: make(map[uint64]uint64),
 		mdChecks:     make(map[uint64]mdCheckRun),
+		recopies:     make(map[uint64]uint64),
 		thinChecks:   make(map[uint64]*thinCheckRun),
 		probers:      make(map[uint64]*legProber),
 		cutters:      make(map[uint64]*pathWatcher),

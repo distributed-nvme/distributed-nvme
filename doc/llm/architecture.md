@@ -4571,40 +4571,64 @@ serve and hold the only copy of the leg's writes since, and a cancel throws
 it away: the source then serves its content as of the cutover, so this
 leg loses every write since, and a block the pool first mapped after the
 destination began to serve reads the source's old extent bytes, possibly
-another pool's. In a group with more than one leg the other legs hold those
-writes, but md does not know this leg is behind, and reads can return its
-old bytes; nothing copies the leg again, since the cancel marks nothing on
-it: a member md holds in sync stays so, one md failed while the leg went
-back to the source is put back by a re-add that md resyncs from its
-write-intent bitmap (`cnagent.md`
-CN12), which marks what was written while it was out and none of what the
-destination took, and
-`CreateRepair` refuses a leg with no `err_epoch` (Repairs). The gateway
-cannot tell whether the destination has served without a call to an agent,
-and the flag is in etcd and exact, so it refuses from the cutover on;
-`force` is the operator's way out and costs what this paragraph says. A
-forced cancel loses nothing when nothing writes to the pool from the
-cutover until the primary has taken the cancel: the cancel answers at its
-commit, and until the primary's converge drops its path to the destination
-(`cnagent.md` CN10), a write can still land there and is lost with it, in
-a group with no other leg in sync (`scope.md` entry "A forced migration
-cancel after the cutover"). After writes,
-its one safe end is in an md-raid1 group whose other leg md holds in sync,
-where the source side is gone for good before the copy is whole (a whole
-copy is finished unforced instead, as `FinishMigration` asks only the
-destination's agent for its proof): the leg then keeps no side that
-serves, md fails its member, and a repair replaces it with a fresh leg md
-copies whole (Repair), as a forced finish does where the destination is
-gone (`operations.md`, Ending a migration with force). Action: the
-mirror rollback: the STM removes the **destination** `Side` and the
-`Migration`, returns the destination DN's extents and the
-migration's metadata units, and bumps `SpRev` and the destination's
-`DnRev`. The source side returns to normal service on the next
-`SyncupSide` (ANA back, the migration export dropped), or, before the
-cutover, simply keeps serving; the destination agent tears its stack down,
-the `LocalMigrBmPath` files included. A cancel before the cutover needs no
-force, and it is how an operator ends a migration whose cutover never comes
-(Migration).
+another pool's. The gateway cannot tell whether the destination has served
+without a call to an agent, and the flag is in etcd and exact, so it
+refuses from the cutover on; `force` is the operator's way out, and The
+forced cancel, below, is what it costs. Action: the mirror rollback: the
+STM removes the **destination** `Side` and the `Migration`, returns the
+destination DN's extents and the migration's metadata units, and bumps
+`SpRev` and the destination's `DnRev`. The source side returns to normal
+service on the next `SyncupSide` (ANA back, the migration export dropped),
+or, before the cutover, simply keeps serving; the destination agent tears
+its stack down, the `LocalMigrBmPath` files included. A cancel before the
+cutover needs no force, and it is how an operator ends a migration whose
+cutover never comes (Migration). Reply `migr_id`, and for a forced cancel
+after the cutover `copy_again` and `loss` (below).
+
+**The forced cancel.** A cancel after the cutover does three things more.
+First, its write marks the leg: `Leg.recopy_revision`, the `SpRev`
+revision the write commits. The leg's content is the source's as of the
+cutover. The primary then reads whether the leg's one side alone serves it
+on its node, the leg row reading `RES_STATUS_OK` with
+`RES_REASON_LEG_PATH_NOT_SOLE` while another controller of the leg's
+subsystem, as the destination's, could take its IO now or after a
+reconnect (`cnagent.md` CN28). In an md-raid1 group of more than one leg md counts the leg whole,
+so reads would return its old bytes, while the other leg holds the writes
+since: the primary takes the leg's member out of the array, zeroes its md
+superblock and adds it fresh, and md copies the whole leg from a member in
+sync (`cnagent.md` CN12, The recopy); it does so only while the leg's own
+side alone serves the leg on its node, so the copy never goes to the
+destination. The worker clears the mark once a report of the primary at or
+past the mark's revision names the recopy with the leg in sync, or, in any
+other group, reads the leg served by its own side alone (`dnv-worker.md`
+AR13). Until the primary's recopy begins, a read can still return the
+leg's old bytes: a few seconds, from the source's return until the
+primary's converge, which the answer's wait covers. Second, the reply
+says what the cancel cost: `copy_again`, from the write, when the primary
+is to copy the leg again, and `loss`, a text, where the writes since the
+cutover are lost on the leg, or may be: a pool that keeps one leg per
+group, a primary's report, read before the write outside the transaction,
+that holds no other leg of the group in sync, or one that did not answer.
+That report only words the reply; the transaction decides. Third, after
+the write it waits until the primary uses the old side's path alone: until
+the primary's report, at or past the cancel's revision, reads the leg's
+row `RES_STATUS_OK` with no reason and, where the primary is to copy the
+leg again beside another leg in sync, names the cancel's revision as the
+recopy it began (`GrpInfo.leg_id_to_recopy_revision`), trying again each
+second, for at most `MigrCancelWaitSeconds`, so a host write after the
+answer lands on the source and a read after it no longer meets the leg's
+old bytes. Before that, the primary can still write the leg to the
+destination, which the cancel throws away. At the bound it answers
+`DEADLINE_EXCEEDED`, the cancel committed, naming the cancel's revision
+and carrying the `loss`, and the operator checks with `dnvctl cntlr
+inspect`, before any write, that `applied_revision` reaches that revision
+and the leg row reads OK with no reason, as a report from before the
+cancel, when the leg had two sides, reads that too. A forced cancel thus
+loses nothing a host was told was done in an md-raid1 group with another
+leg in sync, when no host writes until its answer; in a pool that keeps one
+leg per group the writes since the cutover are lost, which the reply's
+`loss` says (`scope.md` entry "A forced migration cancel after the cutover
+loses the writes since, where no other leg holds them").
 
 **GetMigration** — one STM read; the reply is the record as stored, its
 `cutover_pending` included, which tells whether a finish can succeed yet.

@@ -239,6 +239,20 @@ message Leg {
     // finish, a worker's included, retires it kept (architecture.md, Retired
     // legs). No agent reads it. Appended, never renumbered.
     bool keep = 5;
+    // The SpRev revision of the forced cancel's write that marked the leg,
+    // zero while no mark stands: a forced CancelMigration after the cutover
+    // sets it on the migration's leg, as the old side then serves the leg's
+    // content as of the cutover. The primary then reports whether that side
+    // alone serves the leg on its node (RES_REASON_LEG_PATH_NOT_SOLE). In an
+    // md-raid1 group of more than one leg the primary also fails the leg's
+    // member, zeroes its md superblock and adds it fresh, so md copies it
+    // whole, and reports the revision it acted on
+    // (GrpInfo.leg_id_to_recopy_revision). The sp worker clears the mark
+    // once a report at or past its revision shows that copy done with the
+    // leg in sync, or, in any other group, the leg served by its own side
+    // alone (architecture.md, Migrations; cnagent.md CN12, CN28;
+    // dnv-worker.md AR13). Appended, never renumbered.
+    uint64 recopy_revision = 6;
 }
 
 message Group {
@@ -577,6 +591,18 @@ enum ResReason {
     // and no failover or cntlr replacement follows it (dnv-worker.md HL2);
     // the case stays with the operator. Appended, never renumbered.
     RES_REASON_POOL_META_DAMAGED = 12;
+    // A leg row that reads RES_STATUS_OK, of a leg with one side and a
+    // recopy mark (Leg.recopy_revision), while that side is not known to be
+    // the only path to the leg on this node: a controller of the leg's
+    // subsystem that is not gone, deleting or dead has another address, as
+    // a cancelled migration's new side's, no controller of its own reads
+    // live and ANA optimized, or the lookup did not answer (cnagent.md
+    // CN28). The primary sets it, on both channels; no health rule reads
+    // it. A forced
+    // CancelMigration's answer waits for the primary's row of the leg to
+    // read OK without it (architecture.md, Migrations, The forced cancel).
+    // Appended, never renumbered.
+    RES_REASON_LEG_PATH_NOT_SOLE = 13;
 }
 
 message ResInfo {
@@ -751,6 +777,14 @@ message CntlrInfo {
         // last in a failover (dnv-worker.md RW24). Appended, never
         // renumbered.
         map<uint64, uint32> in_sync_leg_id_to_slot = 7;
+        // The recopy mark (Leg.recopy_revision) of each leg of the group
+        // whose recopy this agent process began for that mark, its member
+        // failed, removed and zeroed and its fresh add following, while the
+        // cntlr's request still carries a mark with that revision (cnagent.md CN12, CN28); the sp worker
+        // clears a mark only once the reading names its revision and holds
+        // the leg in sync (dnv-worker.md AR13). Kept in memory alone, so an
+        // agent restart forgets it. Appended, never renumbered.
+        map<uint64, uint64> leg_id_to_recopy_revision = 8;
     }
     map<uint64, ResInfo> ss_id_to_subsystem = 1;
     map<uint64, ResInfo> ns_id_to_namespace = 2;
@@ -2253,6 +2287,14 @@ message CancelMigrationRequest {
 
 message CancelMigrationReply {
     uint64 migr_id = 1;
+    // A forced cancel after the cutover: true when it marked the leg to be
+    // copied again (Leg.recopy_revision), and, non-empty, why the writes
+    // since the cutover are lost on the leg, or may be: a group that is not
+    // md-raid1, a primary's report that holds no other leg of the group in
+    // sync, or a report that did not answer (architecture.md, Migrations).
+    // Appended, never renumbered.
+    bool copy_again = 2;
+    string loss = 3;
 }
 
 message GetMigrationRequest {

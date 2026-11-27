@@ -1681,15 +1681,31 @@ rather than a candidate problem.
   build kept the migration's bitmap under (`architecture.md`, Upgrade in
   lockstep); `BumpSpRev`. The write's errors are lost invariants,
   `ABORTED`. Reply `migr_id`.
-* **CancelMigration** — STM: resolve; token; the migration; its
-  `cutover_pending` clear and `force` false is `FAILED_PRECONDITION`
-  (`migrCancelAllowed`; `architecture.md`, Migrations); the reverse of the
-  create through `model.EndMigrationIn`, the write the sp worker's cancel
-  runs too (`dnv-worker.md` MD6): drop the destination side, release the
-  destination DN's extents and the `meta_units` the `Migration` records
-  with one `BumpDnRev`, delete the `Migration` and its list entry, with
-  the keys an older build kept the migration's bitmap under
-  (`architecture.md`, Upgrade in lockstep); `BumpSpRev`. Reply `migr_id`.
+* **CancelMigration** — two phases. Phase 1, a snapshot: resolve; token;
+  the migration; its `cutover_pending` clear and `force` false is
+  `FAILED_PRECONDITION` (`migrCancelAllowed`; `architecture.md`,
+  Migrations); for a cancel after the cutover, the leg and its group by the
+  source side, and the pool's primary. Between the phases, for a cancel
+  after the cutover with a primary, one `GetCntlrInfo` of the primary for
+  the group's legs md holds in sync (`cancelLegsInSync`), whose answer only
+  words the reply. Phase 2, the deciding STM: the same resolution, token
+  and refusal; a migration whose cutover state or id changed since phase 1
+  is `ABORTED`; the reverse of the create through `model.EndMigrationIn`,
+  the write the sp worker's cancel runs too (`dnv-worker.md` MD6): drop the
+  destination side, release the destination DN's extents and the
+  `meta_units` the `Migration` records with one `BumpDnRev`, delete the
+  `Migration` and its list entry, with the keys an older build kept the
+  migration's bitmap under (`architecture.md`, Upgrade in lockstep), and,
+  after the cutover, mark the leg (`Leg.recopy_revision`); `BumpSpRev`.
+  Reply `migr_id`, and after the cutover `copy_again` and `loss`
+  (`cancelLoss`). Before it answers, a cancel after the cutover waits for
+  the primary's report, at or past the cancel's revision, to read the
+  leg's row `RES_STATUS_OK` with no reason and, where the primary is to
+  copy the leg again beside another leg in sync, to name that revision as
+  the recopy it began (`waitOldSideServes`), trying again each second for
+  at most `MigrCancelWaitSeconds`, and answers `DEADLINE_EXCEEDED` at the
+  bound, the cancel committed, its message naming the revision and
+  carrying the loss (`architecture.md`, Migrations, The forced cancel).
 * **GetMigration** — one STM read; the record as stored, `cutover_pending`
   included.
 

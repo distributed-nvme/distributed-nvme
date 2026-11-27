@@ -137,6 +137,41 @@ func (v *subsysView) available() bool {
 	return false
 }
 
+// servingSide is the side of lp, a leg with one side, whose controller
+// alone serves the leg on this node (CN28, RES_REASON_LEG_PATH_NOT_SOLE):
+// every controller of the leg's subsystem that is not gone, deleting or
+// dead has that side's address, and one of them reads live and ANA
+// optimized, so IO to the leg goes to that side alone and no controller
+// of another side can take it again; zero otherwise, and for a controller
+// whose address did not read, which may be a path to anywhere (CN10).
+func (v *subsysView) servingSide(lp *legPlan) uint64 {
+	if v == nil || !v.found || len(lp.sides) != 1 {
+		return 0
+	}
+	tr := lp.sides[0].GetNvmeTrConf()
+	optimized := false
+	for _, ctrl := range v.ctrls {
+		if ctrl.addrUnknown != nil {
+			return 0
+		}
+		if ctrl.gone || ctrl.state == "deleting" || ctrl.state == "dead" {
+			continue
+		}
+		if ctrl.trAddr != tr.GetTrAddr() || ctrl.trSvcId != tr.GetTrSvcId() {
+			// Another address: a live controller takes IO now, and one
+			// that reconnects or resets can again, as long as that side's
+			// disk node still exports, so neither leaves the side alone.
+			return 0
+		}
+		optimized = optimized ||
+			(ctrl.state == "live" && ctrl.anaState == "optimized")
+	}
+	if !optimized {
+		return 0
+	}
+	return lp.sides[0].GetSideId()
+}
+
 // errSubsysUnknown marks every failure of lookupSubsys (CN10), so a caller
 // can tell "this pass does not know whether the NQN is connected" from its
 // step's other failures, such as a refused connect. Its text is the middle
@@ -379,6 +414,7 @@ func (s *CnAgentServer) ensureLegs(
 			s.startLegProber(st, plan, lp)
 		}
 		info.LegIdToLeg[lp.legId] = s.legInfo(ctx, st, plan, lp, view, nil)
+		markNotSole(st.tracker, info, lp)
 	}
 	return available
 }
@@ -1321,6 +1357,7 @@ func (s *CnAgentServer) legPathRows(
 	info *pb.CntlrInfo,
 ) (*subsysView, error) {
 	if !lp.twoSided() {
+		s.legServingSide(ctx, plan, lp, view)
 		return view, nil
 	}
 	t := st.tracker
@@ -1353,6 +1390,59 @@ func (s *CnAgentServer) legPathRows(
 		info.SideIdToPath[sideId] = t.Set(key, name, status, details)
 	}
 	return view, lookupErr
+}
+
+// legServingSide is a primary's serving-side test of a leg with one side
+// that carries a recopy mark (Leg.recopy_revision), as a forced migration
+// cancel after the cutover leaves it (CN28, RES_REASON_LEG_PATH_NOT_SOLE),
+// on both channels: the side whose controller alone serves the leg
+// (subsysView.servingSide), from view, the converge's own, or else a lookup
+// of the leg in the pass's walk that it keeps to itself, so the read's
+// other steps over the leg see no view they did not take. It sets
+// lp.servingSide, which the group steps of the same pass read (CN12, The
+// recopy), and lp.notSole where the test found no such side or its lookup
+// did not answer, which the leg row reads (markNotSole); neither on a
+// standby, whose paths are not optimized by design and which copies
+// nothing, nor for a leg with no mark, which a primary's read does not look
+// up while its row reads OK, nor while the level suppresses legs, while the side is unprovisioned
+// or while a sweep's disconnect of the leg's subsystem is in flight, each
+// of which gives the leg row a status of its own.
+func (s *CnAgentServer) legServingSide(
+	ctx context.Context,
+	plan *cntlrPlan,
+	lp *legPlan,
+	view *subsysView,
+) {
+	lp.servingSide, lp.notSole = 0, false
+	if !plan.primary || lp.leg.GetRecopyRevision() == 0 || !plan.wantLeg ||
+		len(lp.sides) != 1 || !lp.sides[0].GetProvisioned() ||
+		s.disconnectInFlight(lp.nqn) {
+		return
+	}
+	if view == nil {
+		var err error
+		view, err = s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+		if err != nil {
+			lp.notSole = true
+			return
+		}
+	}
+	lp.servingSide = view.servingSide(lp)
+	lp.notSole = lp.servingSide == 0
+}
+
+// markNotSole gives the leg row of lp, a leg with one side whose side
+// legServingSide did not find serving alone, RES_REASON_LEG_PATH_NOT_SOLE,
+// its status and details kept, while the row reads RES_STATUS_OK (CN28): a
+// row of another status already says the leg does not serve.
+func markNotSole(t *agent.ResTracker, info *pb.CntlrInfo, lp *legPlan) {
+	row := info.GetLegIdToLeg()[lp.legId]
+	if !lp.notSole || row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return
+	}
+	info.LegIdToLeg[lp.legId] = t.SetReason(resKeyOf(resKeyLegFmt, lp.legId),
+		row.GetResName(), row.GetStatus(), row.GetDetails(),
+		pb.ResReason_RES_REASON_LEG_PATH_NOT_SOLE)
 }
 
 // twoSided reports whether the leg's side_list holds two sides: a

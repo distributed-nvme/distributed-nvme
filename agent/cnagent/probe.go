@@ -181,6 +181,8 @@ func (s *CnAgentServer) probeCntlr(
 			lp.wrapperName = rowFailure(errRowDiffers, wcName)
 		}
 		info.LegIdToLeg[lp.legId] = row
+		// CN28: a one-sided leg whose side is not known to serve it alone.
+		markNotSole(t, info, lp)
 	}
 
 	// Groups — the reading's md walk serves all of them and the concat rows
@@ -245,8 +247,15 @@ func (s *CnAgentServer) probeCntlr(
 					name: fmt.Sprintf("md check of group %#x", gp.grpId),
 					err:  errMdCheckDue})
 			}
+			// CN12, The recopy: a marked leg the converge would copy again
+			// (recopyDue).
+			if name := s.recopyDue(ctx, st, plan, gp, detail,
+				info.LegIdToLeg); name != "" {
+				putBack = append(putBack, verdictName{
+					kind: agent.LeftoverKindMdMember, name: name})
+			}
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp),
-				mdCheckDone(st, gp))
+				mdCheckDone(st, gp), recopiedLegs(st, gp))
 			if found != nil && !found.Exists && gp.rep != nil &&
 				gp.rep.aborting() {
 				// CN12, The abort: with no array of the group, an abort

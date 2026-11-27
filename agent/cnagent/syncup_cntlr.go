@@ -269,6 +269,7 @@ func (s *CnAgentServer) convergeCntlr(
 	// delivered drops them from the plan, which only stops this pass acting.
 	keepForcedStarts(st, plan)
 	keepMdChecks(st, plan)
+	keepRecopies(st, plan)
 	if !st.reqFromRpc {
 		plan.dropForcedStartMarks()
 	}
@@ -460,7 +461,7 @@ func (s *CnAgentServer) build(
 				continue
 			}
 			detail, running, refusals, err := s.ensureGroup(
-				ctx, plan, gp, available, info.LegIdToLeg, dead)
+				ctx, plan, gp, available, info.LegIdToLeg, dead, st.recopies)
 			// CN28: an OK row carries the array's state line, as a read's
 			// does, when the pass read the array as it left it.
 			line := ""
@@ -511,7 +512,8 @@ func (s *CnAgentServer) build(
 				// the array as the pass left it.
 				s.stepMdCheck(ctx, st, gp, detail)
 				reportGrpReading(info, gp, detail, refusals,
-					actedMark(st, gp), mdCheckDone(st, gp))
+					actedMark(st, gp), mdCheckDone(st, gp),
+					recopiedLegs(st, gp))
 			} else if running && detail != nil {
 				// CN12, The md check: a member reconciliation that failed
 				// over a running array still steps the check, over the
@@ -1269,6 +1271,40 @@ func keepForcedStarts(st *cntlrState, plan *cntlrPlan) {
 			delete(st.forcedStarts, grpId)
 		}
 	}
+}
+
+// keepRecopies drops the memory of a recopy (cntlrState.recopies) of each
+// leg whose request carries no recopy mark, or a mark of another revision,
+// and of each leg the request no longer lists: the worker has cleared the
+// mark the recopy acted on, or a new cancel wrote a new one. Every converge
+// runs it, from the request alone.
+func keepRecopies(st *cntlrState, plan *cntlrPlan) {
+	for legId, revision := range st.recopies {
+		if lp := plan.legById[legId]; lp == nil ||
+			lp.leg.GetRecopyRevision() != revision {
+			delete(st.recopies, legId)
+		}
+	}
+}
+
+// recopiedLegs are the legs of gp whose recopy a group's reading reports
+// (CN28, GrpInfo.leg_id_to_recopy_revision): each leg whose request carries
+// a recopy mark of the revision this incarnation's recopy acted on
+// (cntlrState.recopies), the same on a read as on a converge; nil for
+// none.
+func recopiedLegs(st *cntlrState, gp *grpPlan) map[uint64]uint64 {
+	var out map[uint64]uint64
+	for _, lp := range gp.legs {
+		revision := lp.leg.GetRecopyRevision()
+		if revision == 0 || st.recopies[lp.legId] != revision {
+			continue
+		}
+		if out == nil {
+			out = make(map[uint64]uint64)
+		}
+		out[lp.legId] = revision
+	}
+	return out
 }
 
 // actedMark is the revision a group's reading reports as the mark this
