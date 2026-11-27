@@ -666,20 +666,12 @@ func plantDm(node *fakeNode, name, table string) string {
 	return devNo
 }
 
-// plantWrites gives the dm device name one write in flight, as its
-// /sys/dev/block/<number>/inflight reads (Dm.InFlight).
-func plantWrites(node *fakeNode, name string) {
-	node.mu.Lock()
-	defer node.mu.Unlock()
-	devNo := node.devNo["/dev/mapper/"+name]
-	node.files["/sys/dev/block/"+devNo+"/inflight"] = "       0        1\n"
-}
-
 // TestLegBitmapDrainsTheThinDevices is CN27's drain: before the snapshot is
-// reserved, every thin device over the slice's pool with a write in flight
-// and not suspended is suspended and then resumed, one at a time, a device
-// the plan does not hold too; one with no write in flight, a suspended one,
-// and a thin device over another pool are left alone.
+// reserved, every thin device over the slice's pool that is not suspended
+// is suspended and then resumed, one at a time, a device the plan does not
+// hold too, and one whose in-flight counter reads zero as well, as dm-thin
+// holds a write it does not count while it zeroes a new block; a suspended
+// one and a thin device over another pool are left alone.
 func TestLegBitmapDrainsTheThinDevices(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -701,9 +693,6 @@ func TestLegBitmapDrainsTheThinDevices(t *testing.T) {
 	otherPool := plantDm(node, "other-pool", "0 2048 linear 8:0 0")
 	other := "other-thin"
 	plantDm(node, other, "0 2048 thin "+otherPool+" 1")
-	for _, name := range []string{thin, leftover, parked, other} {
-		plantWrites(node, name)
-	}
 
 	node.Reset()
 	if got := legBm(t, srv, testDataLeg, 0, 0); got !=
@@ -715,15 +704,18 @@ func TestLegBitmapDrainsTheThinDevices(t *testing.T) {
 	assertOrder(t, node,
 		"dmsetup suspend "+thin,
 		"dmsetup resume "+thin,
+		"dmsetup suspend "+idle,
+		"dmsetup resume "+idle,
 		"dmsetup suspend "+leftover,
 		"dmsetup resume "+leftover,
 		"reserve_metadata_snap",
 	)
-	for _, name := range []string{idle, parked, other} {
+	for _, name := range []string{parked, other} {
 		assertNoCall(t, node, "dmsetup suspend "+name)
 		assertNoCall(t, node, "dmsetup resume "+name)
 	}
-	if node.dms[thin].suspended || node.dms[leftover].suspended {
+	if node.dms[thin].suspended || node.dms[idle].suspended ||
+		node.dms[leftover].suspended {
 		t.Fatal("the drain left a thin device suspended")
 	}
 	if !node.dms[parked].suspended {
@@ -741,8 +733,6 @@ func TestLegBitmapRefusedWhenTheDrainFails(t *testing.T) {
 	scriptDump(srv, node, caseBDump)
 	thin := srv.nf.CnThinDevName(testCluster, testCn, testSp, testTd,
 		testSlice)
-	plantWrites(node, thin)
-
 	node.Reset()
 	node.mu.Lock()
 	node.failCmd["dmsetup suspend "+thin] = "device-mapper: interrupted"
@@ -764,8 +754,8 @@ func TestLegBitmapRefusedWhenTheDrainFails(t *testing.T) {
 }
 
 // TestLegBitmapDrainRefusals: a device or table listing that may lack a
-// device, and a thin device with a write in flight and a table waiting,
-// whose resume would drop that table, each fail the read before anything
+// device, and a thin device with a table waiting, whose resume would drop
+// that table, each fail the read before anything
 // is suspended or reserved (CN27).
 func TestLegBitmapDrainRefusals(t *testing.T) {
 	for _, tc := range []struct {
@@ -785,6 +775,11 @@ func TestLegBitmapDrainRefusals(t *testing.T) {
 			func(node *fakeNode, thin string) {
 				node.dms[thin].waiting = &fakeTable{table: node.dms[thin].table}
 			}, "table waiting"},
+		{"a thin device sorted last with a table waiting",
+			func(node *fakeNode, thin string) {
+				node.dms["zz-thin"].waiting = &fakeTable{
+					table: node.dms["zz-thin"].table}
+			}, "table waiting"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv, node := newTestServer(t)
@@ -796,7 +791,7 @@ func TestLegBitmapDrainRefusals(t *testing.T) {
 			poolNo := node.devNo[nf.DmPath(
 				nf.CnPoolFinalName(testCluster, testCn, testSp, testSlice))]
 			plantDm(node, "leftover-thin", "0 2048 thin "+poolNo+" 77")
-			plantWrites(node, thin)
+			plantDm(node, "zz-thin", "0 2048 thin "+poolNo+" 80")
 			node.mu.Lock()
 			tc.setup(node, thin)
 			node.mu.Unlock()
@@ -826,7 +821,6 @@ func TestLegBitmapRefusedWhenTheResumeFails(t *testing.T) {
 	scriptDump(srv, node, caseBDump)
 	thin := srv.nf.CnThinDevName(testCluster, testCn, testSp, testTd,
 		testSlice)
-	plantWrites(node, thin)
 
 	node.Reset()
 	node.mu.Lock()

@@ -5233,12 +5233,11 @@ without tracking any cursor.
 **The leg bitmap.** No call of the gateway reads it: the sp worker reads
 a migrating leg's bitmap from the primary cntlr's agent through `GetLegBm`
 (`dnv-worker.md` BM7), and Migration says when. The agent first suspends
-and resumes every thin device over the owning slice's pool that has a write
-in flight, so that every write already sent down has its block recorded
-(`cnagent.md` CN27); a write dm-thin holds back while it zeroes or copies a
-new block is counted in flight by no device, so it can be missing from the
-bitmap (`scope.md` entry "The read of a leg's written blocks can miss a
-block that dm-thin still prepares"). It then walks the pool
+and resumes every thin device over the owning slice's pool that is not
+suspended, so that every write a device took has its block recorded, a
+write dm-thin holds back while it zeroes or copies a new block included,
+which the kernel's in-flight count does not show (`cnagent.md` CN27). It
+then walks the pool
 metadata of that slice and translates pool-data blocks through the
 pool-data linear concat and the group geometry down to this leg's **data
 region** (`cnagent.md` CN27), returning bit k as **1 iff no pool block maps
@@ -5540,8 +5539,8 @@ its pad bits in the middle of the chunk and shift every later bit. So
   dumped and released after every reserve that succeeded or did not answer
   (`cnagent.md` CN25 to CN27): the per-slice td mapping bitmap, or the
   leg-projected pool mapping bitmap; `GetLegBm` first suspends and resumes
-  the pool's thin devices that have writes in flight (`cnagent.md` CN27). Reply bitmaps use the
-  wire convention **1 = unmapped**.
+  every thin device over the pool that is not suspended (`cnagent.md`
+  CN27). Reply bitmaps use the wire convention **1 = unmapped**.
 * `InspectGrp` serves the gateway's `InspectGroup` (Repairs): on the
   primary, for each member an md-raid1 group keeps, whether the leg serves,
   its md superblock read and md's view of it, the array's state, and, with
@@ -7223,9 +7222,11 @@ after steps 1 and 2; `dnagent.md` DN12), and every block the pool maps afterward
 whole through the dm-clone ([D15]), so no skip can lose it. A write the
 pool sent before the fence can still be in flight then, landed on this leg
 while its block is not recorded yet, since dm-thin records a new block
-only once the write has ended on every leg of the group: the cn agent's
-read first suspends and resumes every thin device over the slice's pool
-that has a write in flight, which waits for such writes and so for their
+only once the write has ended on every leg of the group, or still held
+back by dm-thin while it zeroes or copies the new block, which the
+kernel's in-flight count does not show: the cn agent's read first suspends
+and resumes every thin device over the slice's pool that is not
+suspended, which waits for every write the device took and so for their
 records (`cnagent.md` CN27).
 The read also needs a usable path to the leg, and from src step 1 on that
 path is the destination's: the primary's cn agent reads the bitmap from a

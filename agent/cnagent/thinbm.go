@@ -255,21 +255,29 @@ func (s *CnAgentServer) thinDumpSnap(
 // block to be recorded. dm-thin records a new block only once the data write
 // has ended on every leg of the group, so in a RAID1 group a write can have
 // landed on one leg while its block is not recorded yet, and the write is
-// still in flight on its thin device until then. A thin device with no write
-// in flight has none: it is left alone, at the cost of one sysfs read. One
-// with writes in flight is suspended and resumed, as a suspend returns only
-// once every write the device sent down has ended; a write that starts after
-// the read of the count is no concern, as the old side takes no more writes
-// by the time the worker reads (dnv-worker.md BM7). The devices come from
+// still open on its thin device until then; and dm-thin holds a write back,
+// uncounted by the kernel's in-flight counter, while it zeroes or copies a
+// new block, as it sends the write down, and dm core starts counting it,
+// only afterwards (accounts_remapped_io). So every thin device over the
+// pool that is not suspended is suspended and resumed, whatever its counter
+// reads, as a suspend returns only once every write the device took has
+// ended; a write that starts after the device's resume is no concern, as
+// the old side takes no more writes by the time the worker reads
+// (dnv-worker.md BM7). The devices come from
 // one listing of the node's tables, each one whose thin target names the
 // pool's device number, so a device the plan does not hold is drained too,
-// and their numbers and flags from one listing of the node's devices; a
-// listing that may lack a device refuses the drain. A suspended device holds
-// no write below it and is left alone. One with a table waiting is refused:
-// Dm.Resume drops a waiting table, which a reload left for the converge that
-// finishes it. A suspend that failed may still have taken effect, so the
-// device is resumed either way, on a ctx the caller's cancellation does not
-// reach. Any failure refuses the read, and the worker reads again later.
+// and their flags from one listing of the node's devices; a listing that may
+// lack a device refuses the drain. A suspended device holds no write below
+// it and is left alone. One with a table waiting is refused: Dm.Resume drops
+// a waiting table, which a reload left for the converge that finishes it.
+// Every refusal comes before the first suspend. A suspend runs under the
+// agent's command limit (SH15), so a write dm-thin holds longer than that
+// refuses the read. A suspend that failed may still have taken effect, so
+// the device is resumed either way, on a ctx the caller's cancellation does
+// not reach. Any failure refuses the read, and the worker reads again later,
+// its copy taking every block after a few refusals (dnv-worker.md BM7). The
+// drain's time, about 18 s for 1024 idle thin devices on the lab, counts
+// against the read's and holds the cntlr's lock and the node read lock.
 func (s *CnAgentServer) drainThinDevices(
 	ctx context.Context,
 	sp *slicePlan,
@@ -304,6 +312,9 @@ func (s *CnAgentServer) drainThinDevices(
 		}
 	}
 	sort.Strings(names)
+	// Every refusal comes before the first suspend, so a refused read has
+	// paused no device.
+	var drain []string
 	for _, name := range names {
 		info := devs.Devs[name]
 		if info == nil {
@@ -313,19 +324,12 @@ func (s *CnAgentServer) drainThinDevices(
 		if info.Suspended {
 			continue
 		}
-		if info.DevNo == "" {
-			return fmt.Errorf("thin device %s: no device number", name)
-		}
-		_, writes, err := s.dm.InFlight(ctx, info.DevNo)
-		if err != nil {
-			return err
-		}
-		if writes == 0 {
-			continue
-		}
 		if info.Waiting {
 			return fmt.Errorf("thin device %s has a table waiting", name)
 		}
+		drain = append(drain, name)
+	}
+	for _, name := range drain {
 		suspendErr := s.dm.Suspend(ctx, name)
 		resumeErr := s.dm.Resume(context.WithoutCancel(ctx), name)
 		if suspendErr != nil {

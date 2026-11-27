@@ -1027,7 +1027,21 @@ states OK.
 snapshot: sent with the only `td_list` the gateway can produce, origin created
 and snapshot not (`architecture.md`, Thin devices), its message sits inside the
 origin's quiesce (`cnagent.md` CN14) and it holds the origin's blocks, no later
-write. A teardown and a converge with every td created then prove on a real
+write. With CN1's writes to DN1 throttled to `THINBM_HOLD_RATE`, the host
+writes 4 KiB into a megabyte of the volume no write reached, so dm-thin
+holds that write back for seconds while it zeroes the new block: the thin
+device's inflight file reads no write meanwhile, the kernel counting the
+write only once dm-thin sends it down. The read of the data leg's written
+blocks, started a second into the hold, then takes at least
+`THINBM_HOLD_MIN_MS`, as its drain waits for the write, and names one more
+written block than the read just before it (CN27). The rate keeps the
+drain's wait short of the agent's 3 s command limit on its suspend, as a
+longer hold refuses the read. The case's metadata leg is on DN1 too, so the
+throttle slows its writes as well: on an agent without the drain the read
+met the held write in its snapshot message, which the command limit
+killed, and was refused rather than missing the block, a miss needing a
+RAID1 group whose other leg stalls. A
+teardown and a converge with every td created then prove on a real
 dm-thin pool that a bare `dmsetup create` attaches the existing ids, both
 mappings intact, with no suspend and no create, snapshot or delete message, the
 activation sweep sending its reserve and release once each (CN14, CN21).
@@ -1381,9 +1395,9 @@ on success and after a failed wipe (below); any other failing run leaves its
 debris and dumps the crash lines of every log (Conventions, A crash
 fails the case), the agents' logs, both
 VMs' dm, md, nvmet and host state, each read bounded, and the failing
-stage's trace id, but for clone_xfer's token bucket, which it removes, as
-the bucket would slow any suite that runs on the VMs before the next
-cleanup, and pause's and groupcut's cut and their writer, which it removes
+stage's trace id, but for clone_xfer's and thinbm's token buckets, which it
+removes, as a bucket would slow any suite that runs on the VMs before the
+next cleanup, thinbm's host writer, which it stops, and pause's and groupcut's cut and their writer, which it removes
 and stops, as the cut would black-hole another suite's connections, redund's drop of new
 connections, which it removes for the same reason, and its netem delay,
 which it removes for the bucket's reason, nodecheck's stalled array and

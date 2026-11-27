@@ -741,20 +741,6 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **The read of a leg's written blocks can miss a block that dm-thin still
-  prepares.** Silent. Once a migration's cutover has begun, the worker
-  reads the leg's list of written blocks from the slice's thin pool. Just
-  before that read, the primary waits for the writes in flight of each
-  thin device, but only of a device whose kernel count of writes in flight
-  is above zero, and dm-thin does not count a write it holds back while it
-  zeroes or copies a new block. So such a write can be missing from the
-  list while the zeros of its block are already on the old side. The new
-  side then skips the block, and when the held write lands there later,
-  the block holds, around the write's bytes, old bytes of a reused extent,
-  possibly another pool's, where zeros belong. md reads from that leg with
-  no error. It needs the group's other leg to stall across the cutover.
-  State: fix decided. Read from dnv's code and the kernel's; not seen in
-  the lab.
 - **A volume's written blocks can be read while a namespace that etcd no
   longer holds still serves it.** Silent. `dnvctl td get-bm` reads a
   volume's list of written blocks, and the gateway answers only while

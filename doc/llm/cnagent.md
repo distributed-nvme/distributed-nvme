@@ -5794,25 +5794,29 @@ Before a data leg's snapshot the read drains the slice's thin devices:
 dm-thin records a new block only once the data write has ended on every
 leg of the group, so in an md-raid1 group a write can have landed on the
 leg while its block is not recorded yet, and a snapshot then would read
-the block as never written; until it is recorded the write is in flight
-on its thin device. The devices are every dm device the node holds whose
-table is a thin target over the slice's `CnPoolFinalName`, found in one
-listing of the node's tables, and so a device the plan does not hold too,
-with their numbers and flags from one listing of the node's devices. A
-device whose in-flight count (`Dm.InFlight`) reads no write is left alone,
-at the cost of that read: every write it sent down has ended, though a
-write dm-thin holds back while it zeroes or copies a new block is not
-counted and can still be on its way (`scope.md` entry "The read of a leg's
-written blocks can miss a block that dm-thin still prepares"); a write that
-starts after the read is no concern, as the old side takes no more writes
-by the time the worker reads (`architecture.md`, Migration). A device with
-a write in flight is suspended and then resumed, one at a time; a suspend
-returns only once every write the device sent down has ended, and so has
-its block recorded. A device found suspended holds no write below it and
-is left as it is; a device with a write in flight and a table waiting
-fails the read, as `Dm.Resume` would drop that table, which a reload left
+the block as never written; until it is recorded the write is open on its
+thin device. The devices are every dm device the node holds whose table is
+a thin target over the slice's `CnPoolFinalName`, found in one listing of
+the node's tables, and so a device the plan does not hold too, with their
+flags from one listing of the node's devices. Each one that is not
+suspended is suspended and then resumed, one at a time, whatever the
+kernel's count of its writes in flight reads: dm-thin holds a write back
+while it zeroes or copies a new block, and dm core counts the write only
+once dm-thin sends it down, so a count of zero proves nothing, while a
+suspend returns only once every write the device took has ended, and so
+has its block recorded. A write that starts after the device's resume is
+no concern, as the old side takes no more writes by the time the worker
+reads (`architecture.md`, Migration). Each suspend runs under the
+agent's command limit (SH15), so a write dm-thin holds back longer than
+that refuses the read. The drain takes its time under the cntlr's lock and
+the node read lock, inside the time the worker gives the read: on the lab,
+1024 idle thin devices over one pool took about 18 s, their suspend, clear
+and resume each, and the snapshot of their metadata 0.04 s more. A device
+found suspended holds no write below it and is left as it is; a device
+with a table waiting fails the read, as `Dm.Resume` would drop that table, which a reload left
 for the converge that finishes it; a listing that may lack a device fails
-it too. A suspend that fails may still have taken effect, so the device is
+it too, every refusal coming before the first suspend. A suspend that
+fails may still have taken effect, so the device is
 resumed either way, on a context the caller's cancellation does not reach,
 and the read fails; a resume that fails leaves the device suspended for
 the cntlr's next converge and fails the read. The worker reads again

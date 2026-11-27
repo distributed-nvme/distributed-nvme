@@ -93,6 +93,13 @@ QID_MAX=3
 # (copy_held).
 COPY_RATE=4mbit
 HOLD_SECS=4
+# thinbm's heldwrite stage (cnagent_integtest.md, Cases, thinbm): the rate
+# CN1's writes to DN1 are throttled to, so dm-thin's zeroing of a new 1 MiB
+# block takes between two and three seconds and the drain's suspend, which
+# the agent's 3 s command limit bounds, waits less than that; the least the
+# read must then take, in milliseconds, as it waits for the held write.
+THINBM_HOLD_RATE=3mbit
+THINBM_HOLD_MIN_MS=900
 # The clones' hydration threshold, with a batch size of one (req_clone): a
 # dm-clone starts a background region's copy only while fewer than this many
 # are in flight (do_hydration in the kernel's dm-clone-target.c counts its
@@ -11263,6 +11270,18 @@ B_TD2=0xc
 B_SS2=0xd
 B_NS2=0xe
 
+# hex_zero_bits <hex> — how many bits of a bitmap in hex read 0: the
+# written blocks of a leg's or a volume's bitmap (architecture.md, raid0
+# bitmap math), and a pad bit past the region's end, which reads 0 too,
+# counted per hex digit.
+hex_zero_bits() {
+	local h=$1 n=0 i zeros=4332322132212110
+	for ((i = 0; i < ${#h}; i++)); do
+		n=$((n + ${zeros:$((16#${h:i:1})):1}))
+	done
+	echo "$n"
+}
+
 case_thinbm() {
 	CASE=thinbm
 	DIAG_CNTLRS=()
@@ -11398,6 +11417,49 @@ case_thinbm() {
 		--slice-idx 0 --start-block 0 --block-cnt 0)
 	assert_eq "$got" 1efdffffffffffff "thinbm origin bitmap gained block 9"
 
+	stage heldwrite "a write dm-thin holds while it zeroes a new block: the leg's read waits for it (CN27)"
+	# The slice's one data leg is on DN1. With CN1's writes to DN1
+	# throttled to THINBM_HOLD_RATE, dm-thin's zeroing of a new 1 MiB block
+	# before the 4 KiB write that needs it takes seconds, and the kernel
+	# counts that write in flight only once dm-thin sends it down
+	# (cnagent.md CN27): the thin device's inflight file reads no write
+	# while dm-thin holds it. The read of the leg's written blocks must wait
+	# for it and then name its block: one more zero bit than just before.
+	local before after took inflight longest
+	before=$(bitmap_hex "$cn" get-leg-bm --sp "$sp" --cntlr "$cntlr" \
+		--leg "$S_DLEG" --start-block 0 --block-cnt 0 --timeout 60)
+	THROTTLED=$cn
+	assert_eq "$(helper "$cn" "throttle_to ${IP[$dn]} $THINBM_HOLD_RATE")" \
+		throttled "thinbm: CN1's writes to DN1 throttled"
+	HOSTW_VMS[hv]=1
+	helper "$hv" "hostw_start '$dev' 11" >/dev/null ||
+		die "thinbm: the host's writer into td block 11 did not start"
+	sleep 1
+	inflight=$(sshv "$cn" "cat /sys/block/\$(basename \$(readlink -f /dev/mapper/$orithin))/inflight")
+	took=$(now_ms)
+	after=$(bitmap_hex "$cn" get-leg-bm --sp "$sp" --cntlr "$cntlr" \
+		--leg "$S_DLEG" --start-block 0 --block-cnt 0 --timeout 60)
+	took=$(($(now_ms) - took))
+	assert_eq "$(helper "$cn" unthrottle)" unthrottled \
+		"thinbm: lifting the throttle"
+	assert_eq "$(helper "$cn" throttle_rules)" "" \
+		"thinbm: a qdisc is left on vm$cn"
+	THROTTLED=0
+	longest=$(helper "$hv" hostw_longest) || longest="none"
+	helper_ok "$hv" hostw_stop >/dev/null
+	HOSTW_VMS[hv]=0
+	log "THINBM heldwrite: the thin device's inflight during the hold" \
+		"'${inflight//  / }'; the host's longest write ${longest%% *} s; the" \
+		"read took $took ms; zero bits before $(hex_zero_bits "$before")," \
+		"during the held write $(hex_zero_bits "$after")"
+	read -r _ inflight <<<"$inflight"
+	assert_eq "$inflight" 0 \
+		"thinbm: the kernel counts no write in flight on $orithin while dm-thin holds one"
+	assert_eq "$(hex_zero_bits "$after")" "$(($(hex_zero_bits "$before") + 1))" \
+		"thinbm: the read during the held write names its new block"
+	[ "$took" -ge "$THINBM_HOLD_MIN_MS" ] ||
+		die "thinbm: the read took $took ms, so it did not wait for the write dm-thin held"
+
 	stage drop "CN21 tears the cntlr down; the pool metadata keeps both ids"
 	# The rebuild's first half (cnagent_integtest.md, Cases, thinbm;
 	# cnagent.md CN14, CN21). The teardown removes every dm
@@ -11461,7 +11523,7 @@ case_thinbm() {
 	assert_eq "$got" 1effffffffffffff "thinbm rebuilt snapshot bitmap"
 	got=$(bitmap_hex "$cn" get-td-bm --sp "$sp" --cntlr "$cntlr" --td "$S_TD" \
 		--slice-idx 0 --start-block 0 --block-cnt 0)
-	assert_eq "$got" 1efdffffffffffff "thinbm rebuilt origin bitmap"
+	assert_eq "$got" 1ef5ffffffffffff "thinbm rebuilt origin bitmap"
 
 	stage check "converge check round"
 	converge_check "$cn" "$sp" "$cntlr" "$cntlrrev"
