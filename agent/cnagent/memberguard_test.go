@@ -491,10 +491,45 @@ func TestTakeBackRefusesAnotherIdentity(t *testing.T) {
 		info := f.syncup(t, withRepairForce(takenBackReq(3,
 			pb.RepStage_REP_STAGE_CREATED, false)))
 		f.assertMdCalls(t, "the converge", f.fail(f.leg1),
-			f.remove(f.leg1), f.add(f.newLegDev))
+			f.remove(f.leg1), f.addFresh(f.newLegDev))
 		if got := verdict(info).GetRefusal(); got != "" {
 			t.Fatalf("the forced repair's refusal is %q", got)
 		}
+	})
+}
+
+// TestTakeBackAddsAFreshMember pins CN12's add of a repair's new leg taken
+// back from a retired leg: md must copy it whole, since its write record can
+// lack regions written while the leg was away, so the primary adds it with
+// mdadm's --add-spare, which never re-adds a member from that record; a new
+// leg that was never a retired leg keeps the plain add.
+func TestTakeBackAddsAFreshMember(t *testing.T) {
+	setup := func(t *testing.T) *repFix {
+		f := newRepFix(t, allLegs...)
+		f.badLegDead()
+		f.node.setSuperblock(f.leg2, fakeSuperblock{
+			role: "Active device 1", events: 50})
+		f.node.setSuperblock(f.newLegDev, fakeSuperblock{
+			role: "Active device 1", events: 10})
+		f.node.sameArrayAs(f.newLegDev, f.leg2)
+		f.node.Reset()
+		return f
+	}
+	t.Run("taken back", func(t *testing.T) {
+		f := setup(t)
+		info := f.syncup(t, takenBackReq(3, pb.RepStage_REP_STAGE_CREATED,
+			false))
+		f.assertMdCalls(t, "the converge", f.fail(f.leg1),
+			f.remove(f.leg1), f.addFresh(f.newLegDev))
+		if got := verdict(info).GetRefusal(); got != "" {
+			t.Fatalf("the take-back's refusal is %q", got)
+		}
+	})
+	t.Run("new", func(t *testing.T) {
+		f := setup(t)
+		f.syncup(t, repairReq(3, pb.RepStage_REP_STAGE_CREATED, false))
+		f.assertMdCalls(t, "the converge", f.fail(f.leg1),
+			f.remove(f.leg1), f.add(f.newLegDev))
 	})
 }
 

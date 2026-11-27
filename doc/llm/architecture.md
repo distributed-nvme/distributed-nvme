@@ -7421,10 +7421,11 @@ back with no superblock, so neither is the copy it was when it left the
 array (Known limits).
 
 **Reuse.** An operator's repair may take a retired leg of its own group as
-its new leg; a worker's repair always takes a fresh one (Repairs). md
-catches it up from the write-intent bitmap in some cases, such as when the
-array has stayed degraded since the leg left, and otherwise copies it whole
-(Known limits).
+its new leg; a worker's repair always takes a fresh one (Repairs). The
+primary adds a taken-back leg as a fresh member, so md copies it whole:
+md's write-intent bitmap can lack regions written while the leg was away,
+since md clears it behind a copy onto another new leg (`cnagent.md` CN12,
+the take-back check).
 A leg that left the array before a forced start is of the array's old
 history, of another identity: the primary refuses its add unless the repair
 carries the operator's force, and with it md copies the leg whole (What the
@@ -10277,18 +10278,6 @@ document and only pointed to here.
   its place and serves; no data is lost.
   Meanwhile a waiting repair is the group's one repair, and the worker's
   leg repair creates no other for the group (`dnv-worker.md` AR8).
-* **A retired leg taken back can join its array with old data.** md
-  catches a returning member up from its write-intent bitmap in some cases,
-  such as when the array has stayed degraded since the member left, and
-  otherwise copies a retired leg that a repair takes back as it copies a
-  fresh leg (Repair).
-  md clears the bitmap behind a copy onto another new leg, so the catch-up
-  misses the regions that copy passed in two cases: that leg died in its
-  copy and the array was then built anew, as by a failover or a reboot of
-  the CN, which drops the full copy md set for that leg; or its copy ended,
-  no host write followed, and it then died. md then marks the taken-back
-  leg in sync while it holds old bytes there (`scope.md` entry "A retired
-  leg taken back can join its array with old data").
 * **A forced start that ends after its zero can leave the group with no
   leg to start from.** The forced start zeroes the superblock of every
   other member it keeps before it assembles the array (Repair, Forced

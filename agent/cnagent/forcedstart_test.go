@@ -1633,7 +1633,7 @@ func TestForcedStartKeepsAStartedRepairsNewLeg(t *testing.T) {
 				examineOf(f.leg2),
 				zeroOf(f.newLegDev),
 				f.forced(f.leg2, mdUpdateUuid),
-				f.add(f.newLegDev))
+				f.addFresh(f.newLegDev))
 			assertNoCall(t, f.node, zeroOf(f.leg1))
 			assertOk(t, info.GetGrpIdToMdRaid()[testDataGrp], "grp data")
 			assertVerdict(t, info, "the started repair", true, false)
@@ -1792,14 +1792,14 @@ func TestTakeBackCheck(t *testing.T) {
 			&fakeSuperblock{role: "Active device 1", events: 10}, false,
 			func(f *repFix) []string {
 				return []string{f.fail(f.leg1), f.remove(f.leg1),
-					f.add(f.newLegDev)}
+					f.addFresh(f.newLegDev)}
 			},
 			func(f *repFix) []string { return []string{f.newLegDev, f.leg2} }},
 		{"no superblock", pb.RepStage_REP_STAGE_CREATED, false, allLegs,
 			nil, false,
 			func(f *repFix) []string {
 				return []string{f.fail(f.leg1), f.remove(f.leg1),
-					f.add(f.newLegDev)}
+					f.addFresh(f.newLegDev)}
 			},
 			func(f *repFix) []string { return []string{f.newLegDev} }},
 		{"fresh", pb.RepStage_REP_STAGE_CREATED, true, allLegs,
@@ -1815,7 +1815,7 @@ func TestTakeBackCheck(t *testing.T) {
 			func(f *repFix) []string { return []string{f.newLegDev} }},
 		{"started, not newer", pb.RepStage_REP_STAGE_STARTED, false, allLegs,
 			&fakeSuperblock{role: "Active device 1", events: 5}, false,
-			func(f *repFix) []string { return []string{f.add(f.newLegDev)} },
+			func(f *repFix) []string { return []string{f.addFresh(f.newLegDev)} },
 			func(f *repFix) []string { return []string{f.newLegDev, f.leg2} }},
 		// The check runs on a STARTED repair's add as on a CREATED one's
 		// (cnagent.md CN12: either add).

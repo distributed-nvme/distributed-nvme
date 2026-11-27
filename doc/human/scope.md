@@ -459,8 +459,9 @@ otherwise and gives its reason. A case marked "silent" shows no error to
 the host. A few other cases that can lose data or show old data stand
 where their cause belongs: the worker deleting a retired leg that holds
 newer data than the array, and a region's last copy (section 6.1); a host
-on the old primary's path reading zeros where it wrote (section 8); and a
-retired leg taken back that joins its array with old data (section 10).
+on the old primary's path reading zeros where it wrote (section 8); and
+the bad leg of a cancelled repair that comes back with old data (section
+10).
 
 ### 5.1 Hosts, flushes and snapshots
 
@@ -3060,20 +3061,23 @@ design:
 - **An md check counts mismatches on never-written blocks.** The count
   means nothing, and dnv does not read it. State: accepted. Procedure
   written, [The md check's mismatch count](operations.md#the-md-checks-mismatch-count).
-- **A retired leg taken back can join its array with old data.** A retired
-  leg taken back is copied whole, unless md takes it back by a short copy
-  of the regions its record names as written while the leg was away, as
-  when the array stayed degraded since the leg left. In two cases md uses
-  that short copy although its record lacks regions, since md clears the
-  record behind a copy onto another new leg:
-  that other new leg died during its copy and the array was then built
-  anew, as by a failover or a reboot of the controller node; or its copy
-  ended, no host write followed, and it then died. md then marks the leg
-  in sync within seconds while it still holds its old bytes of everything
-  written during the other leg's copy, and reads from both legs in turn, so
-  hosts read old blocks with no error. State: accepted for the time of a
-  whole copy; fix decided for the two cases. Read from the kernel's and
-  mdadm's code; not seen in the lab.
+- **The bad leg of a cancelled repair can come back with old data.**
+  Silent. A repair adds its new leg to the array while it is still
+  "created", once its bad leg has left the array, and md starts its copy
+  onto the new leg at once. md keeps a record of the regions written while
+  a leg is away, but it clears that record behind the copy onto the new
+  leg. When the new leg dies during its copy, the repair is aborted and
+  cancelled, and the bad leg stays in the group's list. If the array is
+  then built anew, by a failover or a reboot of the controller node,
+  before the bad leg comes back, the primary takes the bad leg back by a
+  short copy of the regions the record names: md marks it in sync within
+  seconds while it holds its old bytes over every region the copy onto the
+  new leg passed, and reads from both legs in turn, so hosts read old
+  blocks with no error. A retired leg that a repair takes back is always
+  copied whole; a leg of the group's list keeps the short copy on purpose,
+  since a leg that was away for seconds comes back with it in seconds.
+  State: fix later. The same two md steps were seen with md alone in the
+  lab; not seen through dnv.
 - **Steady control-plane cost.** The reaction pass reads the whole pool
   from etcd every interval. At the debug log level every check round logs
   two records per object; at the default log level, info, a round that

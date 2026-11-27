@@ -2041,10 +2041,9 @@ dm-clone (CN18).
   steps; then a repair's new legs are added (below). The put-back and both
   adds wait for a copy source (below). md then resyncs: a
   bitmap catch-up for a briefly absent leg or a member put back, a full
-  copy for a repair's new leg, short of a retired leg taken back in the
-  cases md catches up from its bitmap, such as while the array has stayed
-  degraded (`architecture.md`,
-  Repair). A leg **can
+  copy for a repair's new leg, a retired leg taken back among them, which
+  the primary adds as a fresh member (the take-back check, below;
+  `architecture.md`, Repair). A leg **can
   take** a member back when it is available and its own leg row reads `OK`,
   which on the primary is the CN11 probe's last result. Reason: a leg whose
   disk returns errors usually fails its probe too, and is then left to the
@@ -2179,12 +2178,14 @@ dm-clone (CN18).
 
   The put-back is a remove and then an add, run by mdadm. md keeps its
   claim on a failed member until the member is removed, so an `--add`
-  alone is refused; after the remove, mdadm turns the add into a re-add,
-  and md resyncs only the regions its write-intent bitmap marks, since
+  alone is refused; after the remove, mdadm turns the add into a re-add —
+  save for a new leg taken from a retired leg, which is added fresh and
+  copied whole (the take-back check, below) — and md resyncs only the
+  regions its write-intent bitmap marks, since
   md keeps every region written while the array is degraded marked in
   that bitmap, save the regions behind a copy onto another new leg, which
-  md clears as that copy passes them (`architecture.md`, Known limits, "A
-  retired leg taken back can join its array with old data"). It is not a write of "re-add" to the member's "state":
+  md clears as that copy passes them, the reason a retired leg taken back
+  is added as a fresh member (the take-back check, below). It is not a write of "re-add" to the member's "state":
   that write is made in the agent's own process and waits on md's own
   lock, which a superblock write stuck on a member holds for as long as
   that member's IO is held; it cannot be killed and would hold the
@@ -2233,7 +2234,9 @@ dm-clone (CN18).
   leg and an abort leaves in `leg_list`; as a repair's new
   leg taken from a retired leg, which a cancel gives back as that retired
   leg; or out of existence with its side. Its superblock stays as md left
-  it: that can make a later re-add cheap, and an assembly handed the leg
+  it: that can make a later re-add of a `leg_list` member cheap, while a
+  retired leg taken back is always added fresh (the take-back check,
+  below), and an assembly handed the leg
   reads it, beside the array's own, as no member in sync
   (`architecture.md`, Repair), short of an array the forced start gave a
   new identity: its assembly leaves such a leg out while the leg ranks
@@ -2349,10 +2352,17 @@ dm-clone (CN18).
     keeper's superblock read shows no superblock, since in both there is nothing to
     compare it with and an add could copy over newer data. A superblock
     read that failed or did not answer is the group's error for the pass, as a
-    failed add is. Reason: md copies the array over such a leg however
-    mdadm takes the add — a re-add under the same identity, a fresh add
-    after a forced start's new one — so the newest copy would be lost with
-    no error; a retired leg keeps its data so that a take-back can use it,
+    failed add is. A new leg taken from a retired leg that the check lets
+    in is added with `--add-spare`, mdadm's add of a fresh member, which
+    never re-adds a device from the write-intent bitmap, so md copies it
+    whole. Reason: md clears that bitmap behind a copy onto another new
+    leg, so a re-add after such a copy — the other new leg dead in its copy
+    and the array built anew since, or its copy ended with no write after
+    it and the leg then dead — marks the taken-back leg in sync within
+    seconds while it holds its old bytes over every region that copy
+    passed (`cnagent_integtest.md`, Lab facts). Reason for the refusals:
+    md copies the array over such a leg, so the newest copy would be lost
+    with no error; a retired leg keeps its data so that a take-back can use it,
     and only a forced start zeroes one, once a repair has taken it back as
     a new leg the forced start keeps (below); and the refusal is a verdict
     field, never the group's error, which would set the primary's health

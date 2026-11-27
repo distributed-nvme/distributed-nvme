@@ -33,8 +33,9 @@ import (
 // which the finish keeps as a retired leg and an abort leaves in leg_list;
 // as a repair's new leg taken from a retired leg, which a cancel gives back
 // as that retired leg; or out of existence together with its side. The
-// superblock md left on it can make a later re-add cheap, and keeps an
-// assembly from taking it as in sync (CN12).
+// superblock md left on it can make a later re-add of a leg_list member
+// cheap — a retired leg taken back is always added fresh (AddFresh) — and
+// keeps an assembly from taking it as in sync (CN12).
 type Md struct {
 	cmd *agent.Cmd
 	// oc reads a member's superblock area itself (ReadMember), the one read
@@ -1192,6 +1193,18 @@ func (m *Md) AssembleForced(
 
 func (m *Md) Add(ctx context.Context, devPath, member string) error {
 	return m.cmd.RunOk(ctx, "mdadm", devPath, "--add", "--failfast", member)
+}
+
+// AddFresh adds a member that md must copy whole: `--add-spare` never
+// re-adds a device from the array's write record (the bitmap), as a plain
+// `--add` does for a device whose superblock names a recent member. The
+// record can lack regions written while the device was away: md clears it
+// behind a copy onto another new member, so a member taken back after such
+// a copy would read in sync with old bytes there (cnagent.md CN12, the
+// take-back).
+func (m *Md) AddFresh(ctx context.Context, devPath, member string) error {
+	return m.cmd.RunOk(ctx, "mdadm", devPath, "--add-spare", "--failfast",
+		member)
 }
 
 func (m *Md) Fail(ctx context.Context, devPath, member string) error {
@@ -2919,7 +2932,8 @@ func (s *CnAgentServer) stopGroupArray(ctx context.Context, dev string) error {
 // both, and the add of a member the array lacks, only beside a copy source
 // (hasCopySource) —
 // which mdadm turns into a re-add that md resyncs from its write-intent
-// bitmap. md keeps its claim on a failed member until the member is removed,
+// bitmap, save a new leg taken from a retired leg, which is added fresh
+// (AddFresh) and copied whole. md keeps its claim on a failed member until the member is removed,
 // so an --add alone is refused. Before the put-back it fails, and does not
 // remove, a leg_list member whose leg is dead while another member keeps
 // the data (deadMembers, from dead, the legs CnAgentServer.deadLegs read at
@@ -3109,7 +3123,12 @@ func (s *CnAgentServer) reconcileMembers(
 		}
 	}
 	for _, lp := range step.add {
-		if err := run(s.md.Add, lp.path); err != nil {
+		// A new leg taken from a retired leg is copied whole (AddFresh).
+		add := s.md.Add
+		if gp.rep.takenBack(lp.legId) {
+			add = s.md.AddFresh
+		}
+		if err := run(add, lp.path); err != nil {
 			return changed, refusals, err
 		}
 	}

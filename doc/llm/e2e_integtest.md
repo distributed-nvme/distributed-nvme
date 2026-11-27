@@ -977,8 +977,10 @@ repair keeps the retired time for a cancel, must reach STARTED, and its
 finish must put the retired leg back in its place, with its own `leg_idx`
 and side, and retire the leg that died; md must then hold the group whole,
 by the array's state words and by the whole flag and in-sync list the
-primary reports beside its rows, and mdadm's word on the add and the
-sectors md wrote to the leg are logged (Known limits). Across the two repairs
+primary reports beside its rows; the primary's add of the taken-back leg
+must be the add of a fresh member, which mdadm answers `added`, so md copies
+it whole (`cnagent.md` CN12, the take-back check), and the sectors md wrote
+to the leg are logged. Across the two repairs
 no cntlr may hold a retired leg; host0 reads its data while each leg is dead,
 while md copies, once the group is whole and at the end, and its kernel log,
 marked before the first disk node dies, must report no failed IO, as md fails
@@ -1819,7 +1821,7 @@ asserting it, among them the group cut past its 3 seconds and the 3 second
 cut's pause above one slice, the writes whose fsync was in flight at the
 second reset, lost in the one run that met them, and that reset's kernel-log
 witness, the first block the copy case's crash under unflushed writes lost,
-how md takes a retired leg back, the fstrim's drop where the stripe is below
+the sectors md writes to a retired leg taken back, the fstrim's drop where the stripe is below
 the block, the writes the many-pools case counts at a cut node's return
 and on its agent stop, what the worker did and which writes failed under
 the long run's CPU cap, and the pauses the writers saw.
@@ -2172,29 +2174,12 @@ stage logs the median of those fsyncs.
   crashes of a disk-node guest and its two repair stages, and react's
   two leg repair stages, two forced-start stages, take-over stage,
   migrating-leg stage and group cut are skipped.
-* **How md takes a retired leg back is logged, not asserted.** md catches a
-  retired leg taken back up from its write-intent bitmap in some cases,
-  such as when the array has stayed degraded since the leg left, and
-  otherwise copies it whole (`architecture.md`, Repair, Known limits). The copy case's array
-  stays degraded from the leg's departure to its return, but in between md
-  began a copy onto the leg that replaced it, which step 6 ends by the kill
-  of that leg's disk node, and md copies the returned leg whole after that,
-  whatever the bitmap holds: in a run with no host write to the group while
-  the leg was away, mdadm answered `re-added` and md then wrote 124975
-  sectors to the leg, the whole array, where step 4's catch-up from a clean
-  bitmap wrote 25; read in the kernel's raid1 source, the add of a member
-  with no place of its own sets a full copy that only a copy that ends
-  clears. host0's stamped writer writes the group from just before the
+* **The data written while a retired leg was away is not read from that leg
+  alone.** host0's stamped writer writes the group from just before the
   leg's departure to after the first repair's finish, and its range is read
-  back and its volume deleted then, before the leg's return, so a catch-up
-  that skipped a region of those writes would leave the returned leg stale
-  there with no read to see it. The case logs mdadm's word on the add and
-  the sectors written to the returned leg, and asserts the whole group and
-  the data, not the way; neither reading tells the way at any slice count:
-  mdadm answers `re-added` whenever md takes the member back into the place
-  it held, however md then copies it, and a data group is one extent, which
-  one chunk of md's bitmap covers whole, so the writer's writes leave that
-  chunk dirty and a catch-up from the bitmap writes the whole array too.
+  back and its volume deleted then, before the leg's return, so the copy
+  case proves the whole copy of the returned leg by the primary's add, a
+  fresh member's, not by a read; md reads from both legs in turn.
 * **react's take-over holds the worker's repair created only on the
   primary's controller node.** The reject rule refuses that node's connects
   alone, so a failover inside the hold hands the group to a primary the

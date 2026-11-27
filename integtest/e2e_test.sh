@@ -21190,17 +21190,12 @@ copy_repair() {
 # all, and the node's returning agent has exactly that side to remove
 # (dnagent.md DN6).
 #
-# HOW MD TAKES THE OLD LEG BACK IS LOGGED, NOT ASSERTED (e2e_integtest.md,
-# Known limits): md catches a returned member up from its write-intent
-# bitmap or copies it whole, and once this step's kill has ended md's copy
-# onto step 5's fresh leg it copies it whole. The step logs mdadm's own word
-# on the add and the sectors written to the old leg's member
-# (copy_reuse_catchup), which do not tell the two apart: mdadm answers
-# `re-added` whenever md takes the member back into its place, either way,
-# and one bitmap chunk covers a data group's whole array, which step 5's
-# stamped writer leaves dirty. Either way the group must end whole, host0
-# must read SHA0, and its kernel log since step 5's mark must report no
-# failed IO.
+# HOW MD TAKES THE OLD LEG BACK: the primary adds a taken-back leg as a
+# fresh member, which md copies whole (cnagent.md CN12, the take-back
+# check); the step asserts that form of the add and mdadm's word on it, and
+# logs the sectors written to the old leg's member (copy_reuse_catchup). The
+# group must end whole, host0 must read SHA0, and its kernel log since step
+# 5's mark must report no failed IO.
 
 # copy_ret_side_healthy is the wait on retired leg <leg id>'s side once its
 # disk node is back: `retired-leg list` holds the leg and its side's health
@@ -21224,51 +21219,59 @@ copy_ret_side_healthy() { # <leg id>
 	[ "$epoch" = 0 ]
 }
 
-# copy_reuse_catchup logs how md took retired leg <leg id> back, judging
-# nothing. One reading is mdadm's own word on each add of the leg's md member
-# the primary's cn agent logged after line <mark>, as the agent logs every
-# command with what it wrote on stderr: `re-added` when md took the member
-# back into the place it held, which md then catches up from the array's
-# write-intent bitmap or copies whole (e2e_integtest.md, Known limits), and
-# `added` when md took it as a new member, which md copies whole. The other is
-# how many sectors have been written to the member's device on the primary
-# since the primary connected the leg, the write count md_member_read reads,
-# against the sectors of the group's extents: a catch-up from the bitmap
-# writes only the regions the bitmap marks, a whole copy every region. A log
-# or a member it cannot read is a logged line, never a failure.
+# copy_reuse_catchup checks how md took retired leg <leg id> back: the
+# primary's cn agent logs every command with what it wrote on stderr, and
+# after line <mark> the first add of the leg's md member that went through
+# must be the add of a fresh member (--add-spare), answered `added` by mdadm,
+# not a plain --add, which mdadm can turn into a re-add from the write-intent
+# bitmap (cnagent.md CN12, the take-back check); a later add, a put-back of
+# the leg once its repair has finished, may be plain. It also
+# logs how many sectors have been written to the member's device on the
+# primary since the primary connected the leg, the write count
+# md_member_read reads, against the sectors of the group's extents: a whole
+# copy writes about all of them. A member it cannot read is a logged line.
 copy_reuse_catchup() { # <mark> <leg id>
-	local name lines adds mrd wsect total
+	local name lines adds mrd wsect total bad
 	name=$(cn_leg_name "$PRIMARY_CN_ID" "$SP_ID" "$2")
-	if lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
+	lines=$(ssh_cn "$PRIMARY_CN" "tail -n +$(($1 + 1)) $(cn_log) | \
 		grep -F '$name'; s=(\${PIPESTATUS[@]}); \
-		[ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]"); then
-		adds=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
-			--arg dev "/dev/mapper/$name" '
-			[split("\n")[] | fromjson? // empty
-			 | select(.msg == "os command" and .cmd == "mdadm"
-			     and ((.args // []) | join(" ")
-			          | endswith("--add --failfast " + $dev)))
-			 | {exit_code: .exit_code,
-			    stderr: ((.stderr // "") | gsub("\n"; " "))}]') ||
-			adds="(the records did not parse)"
-	else
-		adds="(the log could not be read)"
-	fi
-	log "  md's catch-up of leg $2: the primary's adds of its member $name" \
+		[ \${s[0]} -eq 0 ] && [ \${s[1]} -le 1 ]") ||
+		die "md's take-back of leg $2: the primary's cn agent log could not be read"
+	adds=$(printf '%s\n' "$lines" | "$JQ" -R -s -c \
+		--arg dev "/dev/mapper/$name" '
+		[split("\n")[] | fromjson? // empty
+		 | select(.msg == "os command" and .cmd == "mdadm")
+		 | ((.args // []) | join(" ")) as $a
+		 | select(($a | endswith("--add --failfast " + $dev)) or
+		          ($a | endswith("--add-spare --failfast " + $dev)))
+		 | {form: (if ($a | endswith("--add-spare --failfast " + $dev))
+		           then "add-spare" else "add" end),
+		    exit_code: (.exit_code // 0),
+		    stderr: ((.stderr // "") | gsub("\n"; " "))}]') ||
+		die "md's take-back of leg $2: the agent's records did not parse"
+	log "  md's take-back of leg $2: the primary's adds of its member $name" \
 		"since the create: $adds"
+	bad=$("$JQ" -r '
+		(map(select(.exit_code == 0)) | .[0]) as $first
+		| if $first == null then "no add of the member that went through"
+		  elif $first.form != "add-spare" then "a plain --add of the member"
+		  elif ($first.stderr | test("re-added")) then "mdadm answered re-added"
+		  elif ($first.stderr | test("added")) then ""
+		  else "mdadm did not answer added" end' <<<"$adds") ||
+		die "md's take-back of leg $2: judging the adds failed"
+	[ -z "$bad" ] ||
+		die "md's take-back of leg $2 is not the add of a fresh member: $bad ($adds)"
 	if mrd=$(helper_cn "$PRIMARY_CN" md_member_read "$name"); then
 		wsect=${mrd##*wsect=}
 		# The group's COPY_REP_EXT extents of EXTENT_SIZE bytes, in the
 		# 512-byte sectors /sys/block counts in.
 		total=$((COPY_REP_EXT * EXTENT_SIZE / 512))
-		log "  md's catch-up of leg $2: $wsect sector(s) written to its" \
+		log "  md's take-back of leg $2: $wsect sector(s) written to its" \
 			"member on the primary since the primary connected it, against" \
 			"the $total sectors of the group's extents (a whole copy writes" \
-			"about all of them, a catch-up from the bitmap the chunks written" \
-			"while the leg was away, all of them where one chunk covers the" \
-			"array)"
+			"about all of them)"
 	else
-		log "  md's catch-up of leg $2: its member $name could not be read: $mrd"
+		log "  md's take-back of leg $2: its member $name could not be read: $mrd"
 	fi
 }
 

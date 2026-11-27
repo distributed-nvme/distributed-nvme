@@ -3103,8 +3103,8 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 			f.dispatchStderr = "mdadm: --metadata does not set the mode, " +
 				"and so cannot be the first option."
 			return "", 2
-		case contains(args, "--add") || contains(args, "--fail") ||
-			contains(args, "--remove"):
+		case contains(args, "--add") || contains(args, "--add-spare") ||
+			contains(args, "--fail") || contains(args, "--remove"):
 			f.dispatchStderr = "mdadm: :option --metadata not valid in " +
 				"manage mode"
 			return "", 2
@@ -3144,7 +3144,7 @@ func (f *fakeNode) cmdMdadm(args []string) (string, int) {
 			f.leaveDeleted(array.node)
 		}
 		return "", 0
-	case contains(args, "--add"):
+	case contains(args, "--add") || contains(args, "--add-spare"):
 		return f.mdAdd(args)
 	case contains(args, "--fail"):
 		return f.mdFail(args)

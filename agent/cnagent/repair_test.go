@@ -195,6 +195,11 @@ func (f *repFix) add(path string) string {
 	return "cmd mdadm " + f.mdDev + " --add --failfast " + path
 }
 
+// addFresh is the add of a member md must copy whole (Md.AddFresh).
+func (f *repFix) addFresh(path string) string {
+	return "cmd mdadm " + f.mdDev + " --add-spare --failfast " + path
+}
+
 // members are the dm paths the data group's array holds.
 func (f *repFix) members() []string {
 	f.node.mu.Lock()

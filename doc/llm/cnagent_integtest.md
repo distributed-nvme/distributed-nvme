@@ -359,6 +359,20 @@ measures as the dn suite's does; and on the dm-clone table. This suite adds:
   one whose count is above is re-added and copied over, its newer data lost
   with no error. An assembly handed members of both identities refuses, in
   every order (`cnagent.md` CN12).
+* A plain `mdadm --add` of a member that left a RAID1 array with an
+  internal bitmap re-adds it from the bitmap in two states where md copied
+  onto another new member in between and cleared the bitmap behind that
+  copy; within one life of the array, with that copy cut off and no stop
+  between, md copies the member whole. The two states,
+  seen with md alone on loop devices, kernel 7.0.0-43, mdadm 4.5: member A
+  failed and removed, a region written, a fresh member added and failed
+  once its copy had passed that region, the array stopped and started from
+  the member left — or that copy ended, no write followed, and the new
+  member failed — then A added: mdadm answered `re-added`, md marked A in
+  sync within two seconds, and A read alone returned its old bytes over the
+  whole region. `mdadm --add-spare` in the same states answered `added`,
+  md copied A whole, and A read alone returned the new bytes
+  (`cnagent.md` CN12, the take-back check).
 * A read of /proc/mdstat waits behind a stuck md member in one of the two
   shapes tried. With the member suspended under a write, md's thread waits
   in the superblock update that marks the array active, which holds no
