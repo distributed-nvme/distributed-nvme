@@ -219,3 +219,63 @@ func TestStoreProbeKeepsANewerRefusal(t *testing.T) {
 	}
 	assertStates(t, "a probe beside a newer refusal", s, true, newer.Error())
 }
+
+// TestStoreTestRecordsARefusal is the store test's write (Store.Test;
+// dnagent.md DN18, The store test): a write the disk refuses sets the
+// refusal, as a refused save does, but never the failed-save state; a
+// cut-off write sets nothing; a write that holds removes its file; while a
+// refusal holds the test writes nothing.
+func TestStoreTestRecordsARefusal(t *testing.T) {
+	ctx := context.Background()
+	const path = "/srv/store/probe-dn-1"
+	var writeErr error
+	var writes, removes int
+	oc := &common.FakeOsClient{
+		WriteProtoFn: func(
+			ctx context.Context, p string, msg proto.Message,
+		) error {
+			writes++
+			return writeErr
+		},
+		RunCommandFn: func(
+			ctx context.Context, name string, args []string, stdin string,
+		) (string, string, int, error) {
+			if name == "rm" {
+				removes++
+			}
+			return "", "", 0, nil
+		},
+	}
+	s := NewStore(oc, "/srv/store")
+
+	if err := s.Test(ctx, path, 4096); err != nil {
+		t.Fatalf("a test that holds: %v", err)
+	}
+	if writes != 1 || removes != 1 {
+		t.Fatalf("a test that holds made %d writes and %d removals, want 1 "+
+			"and 1", writes, removes)
+	}
+	assertStates(t, "a test that held", s, false, "")
+
+	writeErr = fmt.Errorf("write probe: %w", context.DeadlineExceeded)
+	_ = s.Test(ctx, path, 4096)
+	assertStates(t, "a cut-off test", s, false, "")
+
+	noSpace := fmt.Errorf("write probe: %w", syscall.ENOSPC)
+	writeErr = noSpace
+	if err := s.Test(ctx, path, 4096); err == nil {
+		t.Fatal("a refused test returned no error")
+	}
+	if s.SaveFailing() {
+		t.Error("a refused test set the failed-save state")
+	}
+	if text, refused := s.Refusal(); !refused || text != noSpace.Error() {
+		t.Fatalf("the refusal after a refused test is %q/%v, want %q", text,
+			refused, noSpace.Error())
+	}
+	before := writes
+	_ = s.Test(ctx, path, 4096)
+	if writes != before {
+		t.Errorf("the test wrote while a refusal held")
+	}
+}

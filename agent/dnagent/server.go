@@ -56,6 +56,13 @@ type DnAgentServer struct {
 	// reason as fenceWait: no unit test can wait out the production value.
 	zeroRetryInterval time.Duration
 
+	// storeTestInterval paces the store test loop (startStoreTest,
+	// common.DnStoreTestInterval). A field for the same reason as fenceWait.
+	storeTestInterval time.Duration
+	// storeTestStop ends the store test loop: nil until the loop starts,
+	// closed by the join (WaitBackground), under mu.
+	storeTestStop chan struct{}
+
 	// zeroBatchMax and zeroBatchMin bound a side's DN9 zeroing batch: its
 	// first size and the ceiling a success doubles it back to
 	// (common.DnZeroBatchMaxBytes), and the floor a kill halves it down to
@@ -134,8 +141,8 @@ type DnAgentServer struct {
 }
 
 // WaitBackground joins the dn background goroutines enrolled in bg — the DN9
-// zeroing loops and the background reads check rounds start (SH29) — after
-// it stops every armed DN12
+// zeroing loops, the store test loop (DN18), which it stops, and the
+// background reads check rounds start (SH29) — after it stops every armed DN12
 // fence timer (SH27). It first marks the server closed (bgClosed) under mu,
 // the lock every enrollment and every arming takes, so a task either enrolled
 // before the join began and is waited for, or is refused, and no timer is
@@ -150,6 +157,10 @@ type DnAgentServer struct {
 func (s *DnAgentServer) WaitBackground() {
 	s.mu.Lock()
 	s.bgClosed = true
+	if s.storeTestStop != nil {
+		close(s.storeTestStop)
+		s.storeTestStop = nil
+	}
 	var timers []*time.Timer
 	for _, st := range s.sides {
 		if st.fenceTimer != nil {
@@ -310,6 +321,7 @@ func NewDnAgentServer(
 		disk:              disk,
 		fenceWait:         common.SuspendSeconds * time.Second,
 		zeroRetryInterval: common.DnZeroRetryInterval * time.Second,
+		storeTestInterval: common.DnStoreTestInterval,
 		zeroBatchMax:      common.DnZeroBatchMaxBytes,
 		zeroBatchMin:      common.DnZeroBatchMinBytes,
 		zeroSlots:         make(chan struct{}, common.DnZeroConcurrency),

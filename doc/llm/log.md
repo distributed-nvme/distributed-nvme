@@ -337,6 +337,14 @@ the start check's causes joined by "; " (`cnagent.md` CN-CM2); without the
 flag the start ends with the error and no record of its own (`dnagent.md`
 CM3). An agent whose check finds no cause logs neither.
 
+### The store test
+
+A dn agent's store test (`dnagent.md` DN18, The store test) logs, under
+the trace id of its own each test takes, one Error record `local store
+test failed` with `error` for a test whose write failed, refused or cut
+off, or whose removal of the file failed; a test that holds logs nothing
+of its own beside the `OsClient`'s records of its write and removal.
+
 ### The cut of a removed host
 
 A cn agent's cut of a stray connection (`cnagent.md` CN33) logs, under the

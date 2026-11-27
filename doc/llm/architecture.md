@@ -1363,7 +1363,7 @@ and {bm_idx} are both rendered with `BmIdxFmt`.
 | `LocalCnPath` | {prefix}/cn-{cluster}-{cn} | the last accepted `SyncupCnRequest`, or a newer refused one |
 | `LocalCntlrPath` | {prefix}/cntlr-{cluster}-{cn}-{sp}-{cntlr} | the last accepted `SyncupCntlrRequest`, or a newer refused one |
 | `LocalMigrBmPath` | {prefix}/migr-bm-{cluster}-{dn}-{sp}-{migr}-{bm_idx} | one received `PushMigrBitmapRequest` chunk (Bitmap push protocol) |
-| `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes (`dnagent.md` DN18); never loaded |
+| `LocalDnProbePath` | {prefix}/probe-dn-{cluster}-{dn} | the probe a dn agent's read saves while its store's disk refuses writes, and its store test saves at a fixed interval while it does not (`dnagent.md` DN18); never loaded |
 | `StoreFileBootDn` | {prefix}/boot-dn | the kernel's boot id at the dn agent's last start, a wrapped string (`dnagent.md` SH33) |
 | `StoreFileBootCn` | {prefix}/boot-cn | the kernel's boot id at the cn agent's last start, a wrapped string (`dnagent.md` SH33) |
 | `LocalCnProbePath` | {prefix}/probe-cn-{cluster}-{cn} | the probe a cn agent's read saves while its store's disk refuses writes (`cnagent.md` CN28); never loaded |

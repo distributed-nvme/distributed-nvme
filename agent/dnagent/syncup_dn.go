@@ -293,8 +293,73 @@ func (s *DnAgentServer) Reconcile(ctx context.Context) error {
 	// that dies before here leaves the next one to report the reboot too.
 	agent.KeepBoot(ctx, s.store, agent.StoreFileBootDn, s.bootId)
 	s.startup.End()
+	s.startStoreTest()
 	return nil
 }
+
+// startStoreTest starts the store test loop once (DN18): every
+// storeTestInterval it tests the local store's disk with a small write
+// (testStore), until rootCtx ends or the server's join stops it. Its first
+// test comes one interval
+// after the start, so the startup pass itself writes nothing more.
+func (s *DnAgentServer) startStoreTest() {
+	s.mu.Lock()
+	if s.storeTestStop != nil || s.bgClosedLocked() {
+		s.mu.Unlock()
+		return
+	}
+	stop := make(chan struct{})
+	s.storeTestStop = stop
+	ctx := s.rootCtx
+	s.enrollLocked()
+	s.mu.Unlock()
+	go func() {
+		defer s.bg.Done()
+		for {
+			timer := time.NewTimer(s.storeTestInterval)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return
+			case <-stop:
+				timer.Stop()
+				return
+			case <-timer.C:
+			}
+			s.testStore(ctx)
+		}
+	}()
+}
+
+// testStore is one test of the local store's disk (agent.Store.Test), under
+// a trace id of its own (SH2), at the probe path of a disk node the agent
+// holds; an agent that holds none uses its store for nothing, and tests
+// nothing. A refused write turns the store row of every later read to
+// RES_STATUS_ERROR, which marks the node (DN18). It takes no node lock: it
+// touches the local store alone.
+func (s *DnAgentServer) testStore(ctx context.Context) {
+	keys := s.dnKeys()
+	if len(keys) == 0 {
+		return
+	}
+	sort.Strings(keys)
+	st := s.getDn(keys[0])
+	if st == nil {
+		return
+	}
+	req := st.req.Load()
+	attemptCtx := common.WithTraceId(ctx, common.NewTraceId())
+	if err := s.store.Test(attemptCtx,
+		s.nf.LocalDnProbePath(req.GetClusterId(), req.GetDnId()),
+		common.DnStoreTestSize); err != nil {
+		slog.ErrorContext(attemptCtx, msgStoreTestFailed,
+			slog.String("error", err.Error()))
+	}
+}
+
+// msgStoreTestFailed is the Error record of a store test that failed, its
+// write or its removal of the file (testStore; log.md, The store test).
+const msgStoreTestFailed = "local store test failed"
 
 // sweepOrphanRecords is the record half of the node-level pass: it releases
 // the allocation records whose owners the authoritative pointer lists prove
@@ -683,6 +748,7 @@ func (s *DnAgentServer) convergeDn(
 	// its own, as the DN's read writes (agent.ResTracker.In).
 	t := st.tracker.In(ctx)
 	// The store row (DN18): after a SyncupDn whose save held it reads OK,
+	// but where a store test write the disk refused came after that save,
 	// and at startup the store has refused no write yet.
 	info := &pb.DnInfo{StoreInfo: s.store.Row(t)}
 

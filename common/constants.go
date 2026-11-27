@@ -689,6 +689,14 @@ const (
 	// never a hot loop.
 	DnZeroBatchMaxBytes = 64 * 1024 * 1024
 	DnZeroRetryInterval = 5
+
+	// DnStoreTestInterval is how often a dn agent's store test loop tests
+	// its local store's disk with a small write while no refusal holds
+	// (agent.Store.Test; dnagent.md DN18), so a full disk marks the node
+	// before a save is needed. DnStoreTestSize is that write's size in
+	// bytes. A time.Duration and a count.
+	DnStoreTestInterval = 60 * time.Second
+	DnStoreTestSize     = 4096
 	// DnZeroBatchMinBytes is the floor a side's batch backs off to. A batch
 	// the soft timeout killed halves the side's next one, rounded down to a
 	// whole DnZeroBatchMinBytes and never below it; a success doubles it

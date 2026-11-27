@@ -492,7 +492,7 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **probe** — A read of live state through the OS client that creates, changes and removes nothing, made per object (a node's read also writes and removes the store's probe file while the store refuses writes, see probe file), except for what a cntlr's background read takes from the node reading (see reading); a converge's or a read's status read of a dm-clone whose copy reads whole is made once more without the `--noflush` flag and so makes the kernel commit the clone's metadata, while every other status read, the reads inside a bitmap chunk's apply included, carries the flag and commits nothing (see `dnagent.md` SH17). A converge probes first and mutates only the differences, and a background read's info is built from probes alone.
 
-**probe file** — The file a node's background read writes in the agent's local store while the store's disk refuses writes, of random bytes, at least as many as the refused save tried to write, and removes once it holds; a probe that holds clears the refusal the store row reports, unless a newer refused save came after it began, and nothing reads it (see `dnagent.md` DN18). It is the one file a read writes itself.
+**probe file** — The file a node's background read writes in the agent's local store while the store's disk refuses writes, of random bytes, at least as many as the refused save tried to write, and removes once it holds; a probe that holds clears the refusal the store row reports, unless a newer refused save came after it began, and nothing reads it (see `dnagent.md` DN18). It is the one file a read writes itself. A dn agent's store test writes it too while no refusal holds (see store test).
 
 **probe-IO carve-out** — The one sanctioned bypass of the OS client: the leg health probers write and read their health block through `WriteBlockAt` and `ReadBlockDirectAt`, which take no context, hold no OS client slot and log nothing, so the probers log their own probe records (see `osclient.md`, Exported raw helpers and the probe-IO carve-out).
 
@@ -622,7 +622,9 @@ The vocabulary of dnv in alphabetical order, one entry per term, with synonyms s
 
 **storage pool, SP, sp** — `SpConf`, the unit of volume service: a set of cntlrs on controller nodes, slices made of groups of legs on disk nodes, and the thin devices, subsystems, clones, transfers and migrations it owns, with one conf, one level and one revision.
 
-**store row** — A node's row about its agent's local store (`store_info` in `DnInfo` and `CnInfo`): error, with the latest refused write's error, from a save the disk refused until a later save or probe holds, and ok otherwise; the worker sets the node's health epoch from an error row, so the node gets no new side or cntlr, and no side or cntlr is marked by it (see probe file; `dnagent.md` DN18; `dnv-worker.md` HL1).
+**store row** — A node's row about its agent's local store (`store_info` in `DnInfo` and `CnInfo`): error, with the latest refused write's error, from a save or, on a disk node, a store test write the disk refused until a later save or probe holds, and ok otherwise; the worker sets the node's health epoch from an error row, so the node gets no new side or cntlr, and no side or cntlr is marked by it (see probe file; `dnagent.md` DN18; `dnv-worker.md` HL1).
+
+**store test** — A dn agent's test of its local store's disk: every `DnStoreTestInterval` while no refusal holds, a loop of its own writes the probe file and removes it, and a write the disk refuses sets the refusal the store row reports, so a disk that fills while nothing is saved marks the node before a save is needed (see probe file; `dnagent.md` DN18, The store test).
 
 **stray connection** — An nvmet connection whose host is not on its subsystem's list of allowed hosts in the desired state: the one the cut ends (see `cnagent.md` CN33).
 

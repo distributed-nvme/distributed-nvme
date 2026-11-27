@@ -1276,7 +1276,9 @@ unthrottle() {
 # case's mutation-free re-sends, dnagent_integtest.md, Cases).
 # Probe operations (lsblk, dmsetup info/table/status, ls, and the [D13]
 # "os read block") are expected and deliberately absent from the list, exactly
-# mirroring the unit tests' readOnlyPrefixes.
+# mirroring the unit tests' readOnlyPrefixes, and so is the removal of the
+# local store's probe file, which the store test writes every interval
+# (dnagent.md DN18, The store test): local state, not the node's.
 #
 # The command and its verb are bound to variables BEFORE the verb lists: a
 # list piped into index() is the input its argument is evaluated against, so
@@ -1307,7 +1309,9 @@ mutations() {
 	              "resume","clear","message"] | index($verb)))
 	        or ($cmd == "nvme" and (["connect","disconnect"] | index($verb)))
 	        or (["mkdir","rmdir","ln"] | index($cmd))
-	        or ($cmd == "rm")
+	        or ($cmd == "rm" and
+	            ((.args | map(select(startswith("/")))
+	              | all(test("/probe-dn-"))) | not))
 	      )
 	    | .cmd + " " + (.args | join(" "))' "$log" || return 1
 	jq -rn '
@@ -1507,7 +1511,8 @@ store_probe() {
 }
 
 # store_fill writes one file, $STORE/fill, a page at a time until a write
-# fails, and prints full once a probe write fails too, or what is left. The
+# fails, then a second, $STORE/fill2, a moment later, and prints full once a
+# probe write fails too, or what is left. The
 # count only bounds a dd that would go on past a failed write; dd takes no
 # iflag= or oflag= (the dd rule at the head of this script).
 store_fill() {
@@ -1520,6 +1525,12 @@ store_fill() {
 	[ -n "$pages" ] || return 1
 	dd if=/dev/zero of="$STORE/fill" bs=4096 count="$pages" status=none \
 		2>/dev/null
+	# A store test of the agent (dnagent.md DN18, The store test) may hold a
+	# probe file for a moment while the fill runs, and free its pages after;
+	# a second fill a moment later takes them too.
+	sleep 0.5
+	dd if=/dev/zero of="$STORE/fill2" bs=4096 count="$pages" status=none \
+		2>/dev/null
 	if [ "$(store_probe)" = no ]; then
 		echo full
 	else
@@ -1530,7 +1541,7 @@ store_fill() {
 
 # store_unfill removes the fill and prints room once a probe write succeeds.
 store_unfill() {
-	rm -f "$STORE/fill" || return 1
+	rm -f "$STORE/fill" "$STORE/fill2" || return 1
 	if [ "$(store_probe)" = yes ]; then
 		echo room
 	else
@@ -1545,7 +1556,7 @@ store_sums() {
 	local f
 	for f in "$STORE"/*; do
 		[ -e "$f" ] || continue
-		[ "${f##*/}" = fill ] && continue
+		case "${f##*/}" in fill | fill2) continue ;; esac
 		sha256sum "$f" || return 1
 	done
 }

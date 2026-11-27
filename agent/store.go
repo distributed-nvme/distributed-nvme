@@ -389,6 +389,42 @@ func (s *Store) Probe(ctx context.Context, path string) error {
 	return s.Remove(ctx, path)
 }
 
+// Test is a dn agent's test of its store disk (dnagent.md DN18), which its
+// store test loop runs at a fixed interval: while no refusal holds — Probe
+// writes on every read then — it writes the probe file at path, the write a
+// Save makes (a temp file, its fsync, the rename and the directory's fsync,
+// under the same bound) of size random bytes, and removes it. A write the
+// disk refuses is a refusal as a Save's is (Refusal, Row), so the node's
+// store row reads it before any Save is needed, and the worker marks the
+// node; a cut-off write changes nothing. It never touches SaveFailing.
+// Reason: a store disk that fills while nothing is saved shows nothing until
+// the next save, which may be the one a failover needs.
+func (s *Store) Test(ctx context.Context, path string, size int) error {
+	s.mu.Lock()
+	refused := s.refused != nil
+	s.mu.Unlock()
+	if refused {
+		return nil
+	}
+	payload := make([]byte, size)
+	_, _ = rand.Read(payload)
+	cctx, cancel := cmdCtx(ctx)
+	defer cancel()
+	err := s.oc.WriteProto(cctx, path, wrapperspb.Bytes(payload))
+	if err != nil {
+		if !cutOff(err) {
+			s.mu.Lock()
+			if s.refused == nil {
+				s.refused = &storeRefusal{text: err.Error(), size: size}
+			}
+			s.refusals++
+			s.mu.Unlock()
+		}
+		return err
+	}
+	return s.Remove(ctx, path)
+}
+
 // Remove deletes store files (rm -f: a file already gone is no error). No
 // store file is kept as a record of what is left to remove: the sweep finds
 // an object's resources by name (SH7), so an object's request and chunk files

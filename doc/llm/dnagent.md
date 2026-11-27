@@ -199,6 +199,9 @@ The constants this document relies on, whose values and comments
   linked to no port but the agent's own (DN6): until then it may be a
   sibling agent's build in flight. The age is the subsystem directory's
   mtime, read from the node in the agent's own process (SH18).
+* `DnStoreTestInterval` and `DnStoreTestSize`, the store test (DN18, The
+  store test): how often the agent tests its local store's disk with a
+  write while no refusal holds, and how big that write is.
 * `DnZeroBatchMaxBytes`, `DnZeroBatchMinBytes`, `DnZeroAlign`,
   `DnZeroRetryInterval`, `DnZeroConcurrency` and `DnZeroKillBackoff`, the
   side provisioning knobs ([D15], DN9): the background zeroing goroutine
@@ -317,9 +320,11 @@ because rule ids never shift: code comments cite them.) A role server MAY
 run goroutines outside any RPC: the DN12 fence timer, the DN9 side-zeroing
 workers, the background reads the check rounds start (SH29), the CN11 leg
 probers, the CN10 path watchers, the cn sweep's background
-`nvme disconnect` (`cnagent.md` CN10), CN34's fence watch loop and the cn's
+`nvme disconnect` (`cnagent.md` CN10), CN34's fence watch loop, the cn's
 checks of a thin pool's metadata (`cnagent.md` CN13, The needs-check
-mark). The DN12 fence timer is the one of
+mark) and the dn's store test loop (DN18, The store test), which the join
+also stops through a channel of its own, as a test may join a server whose
+`rootCtx` stays open. The DN12 fence timer is the one of
 them that runs a converge. Every one of them derives its ctx from the
 server's **`rootCtx`** — the process-lifetime ctx, which `Serve` derives
 from its own ctx, hands the server before the gRPC listener opens (SH33)
@@ -456,7 +461,8 @@ cn, a cntlr's torn marks file (`cnagent.md` CN14) and its term file
 the gates: their saves and removals follow the marks and the kept term,
 not a request. The
 probe file of DN18 is written the same way while the store refuses writes,
-and never read. Both calls, `WriteProto` and `ReadProto`, run on a ctx
+and by the dn's store test while it does not (DN18, The store test), and
+never read. Both calls, `WriteProto` and `ReadProto`, run on a ctx
 carrying the SH15 soft timeout, as the store's listing and `rm` do (SH6,
 SH7): the calls are in-process, so the bound ends only a wait for an
 `OsClient` slot. A save takes its slot under the locks its RPC holds (SH10,
@@ -471,7 +477,8 @@ marks file, whatever its object. The first is whether its latest save failed, un
 succeeds (`Store.SaveFailing`); SH30 says what a syncup does while it holds.
 The second is whether the disk refused a save: a save that fails with an
 error of the write itself, such as no space left, a read-only file system or
-an IO error, sets it, with that error; the next save that succeeds clears
+an IO error, sets it, with that error, and so does the dn's store test write
+that fails so (DN18, The store test); the next save that succeeds clears
 both, and a probe of DN18 that holds clears the second alone (DN18 says when
 it does not); a save its ctx cut off — the bound, the call's deadline or a
 cancel — leaves it as it is (`Store.Refusal`). The node's store row reads
@@ -4506,8 +4513,9 @@ needed, and the worker never turns one into an `err_epoch`
   `RES_STATUS_ERROR`, with the latest refused write's error, from a save the
   disk refused until a later save or probe holds, and `RES_STATUS_OK`
   otherwise; no reason. Both channels fill it. The `SyncupDn` converge's row
-  always reads OK, since the converge runs only after its own save held, or
-  at startup before any save (DN5). While the second state holds, the
+  reads OK, since the converge runs only after its own save held, or at
+  startup before any save (DN5), but where a store test write the disk
+  refused came between that save and the row. While the second state holds, the
   background read first writes the probe file, `LocalDnProbePath`, the one
   file a read writes itself (SH17): random bytes, at least as many as the
   refused save tried to write, through the store's own write and under its
@@ -4526,8 +4534,23 @@ needed, and the worker never turns one into an `err_epoch`
   `dnv-worker.md` BM2, BM7); a quiet node gets neither while the offers
   pause, so without the probe the row of such a node would read the
   refusal, with an old error, until the next save of anything, and the
-  worker would offer the node for no new side for that long; and the bytes are random, since a file system
-  that compresses or shares blocks stores zeros in next to no room. The row
+  worker would offer the node for no new side for that long; and the bytes
+  are random, since a file system that compresses or shares blocks stores
+  zeros in next to no room. **The store test.** While the second state is
+  clear, the agent's store test loop, which the startup pass starts once
+  it has ended, writes the probe file of a disk node it holds every
+  `DnStoreTestInterval`, `DnStoreTestSize` random bytes through the
+  store's own write and under its bound, under a trace id of
+  its own, and removes it (`Store.Test`); a write the disk refuses is a
+  refusal as a refused save's is, the second state with the write's error,
+  so the next read's row reads `RES_STATUS_ERROR` and the worker marks the
+  node, and the reads' probe then takes over; a cut-off write changes
+  nothing; an Error record names a test that failed, its write or its
+  removal (`log.md`, The store test). No read writes for it, and no node lock is taken: it touches the
+  local store alone. The join stops the loop (SH27). Reason: a store disk
+  that fills while nothing is saved shows nothing until the next save,
+  which may be the one a failover needs (`scope.md` entry "A failover does
+  not bring a pool back while a disk node's agent takes no syncup"). The row
   is the node's alone: a side's refused save marks the node and no side;
   what the worker does with it is `dnv-worker.md` HL1's.
 * `SideInfo.side_dev_info`, named `DnSideName`: the volume-table record —
@@ -5047,13 +5070,16 @@ else reported through `agent_reply` is still a protocol-level refusal.
   of each failed save, and the worker's record of each rejection, on each
   round that re-sends the refused request (SH5; `dnv-worker.md`, Log
   records).
-* A store disk that fills, or turns read-only, while nothing is saved is
-  offered for new sides and cntlrs until a save is refused: the store row
-  reads the saves, the probe of DN18 runs only once one was refused, and no
-  save runs on a quiet node whose rounds answer code zero. The first request
+* A controller node whose store disk fills, or turns read-only, while
+  nothing is saved is offered for new cntlrs until a save is refused: the
+  store row reads the saves, the probe of DN18 runs only once one was
+  refused, and no save runs on a quiet node whose rounds answer code zero;
+  a disk node's store test marks the node within `DnStoreTestInterval`
+  instead, after a restart too (DN18, The store test). The first request
   refused marks the node, and that one object waits on the node until the
   disk takes writes again. A store with room for small saves only can read
   OK while a larger request is refused: a smaller save that holds clears the
   refusal, and the row reads ERROR again only once the larger request's next
   re-send is refused. A restart forgets the refusal, so the row reads OK
-  until a save of the new process is refused.
+  until a save of the new process, or on a disk node its store test, is
+  refused.

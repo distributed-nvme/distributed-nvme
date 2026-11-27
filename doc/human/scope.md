@@ -1945,12 +1945,14 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   The pool comes back when that agent takes syncups again; a forced start
   needs an operator's repair of the unreachable leg first. A stopped agent
   shows before the failover, as a health epoch on the node and on its
-  sides. A full store disk shows nothing, and nothing says that the next
-  failover will fail. State: accepted for an agent that is stopped or cut
-  off from the control plane: moving its legs away would cost a whole copy
-  of every leg on that node for a cut of the control network alone, while
-  the data path is fine. Fix decided for a full store disk. Read from dnv's
-  code; not seen in the lab.
+  sides. A full store disk shows too, as a health epoch on the node: the
+  agent tests its store disk with a small write every minute, and a
+  refused write marks the node in error, so it gets no new side and the
+  operator can free the disk. Nothing says that the next failover will
+  fail. State: accepted: moving the legs of an agent that is stopped or
+  cut off from the control plane, or whose store disk is full, would cost
+  a whole copy of every leg on that node, while the data path is fine.
+  Read from dnv's code; not seen in the lab.
 - **A repair that has not started can block a forced start.** The worker
   creates a repair for a dead leg, and the group's other leg dies too
   before the new leg is in the array. When the first leg comes back with
@@ -2726,15 +2728,14 @@ failover's among them.
   it left the array. The worker's repair at the bound can then give back
   the only whole older copy; the leg md keeps in sync still holds the data.
   State: accepted. Not seen in the lab.
-- **A disk node's full store disk is offered until a save fails.** A quiet
-  node with a full store disk reads ok and is offered for new sides. The
-  first refused request marks it. A side placed there before that, and a
-  cntlr placed on a controller node in the same state, wait for the start
-  hold before they get a health epoch (section 6.1), and a failover can
-  leave a group down while a disk node's store disk is full. State: fix decided for a disk node: its agent
-  will test its store disk with a small write at a fixed interval, so a
-  full disk marks the node early. Fix later for a controller node: no like
-  test is planned there yet. Not seen in the lab.
+- **A controller node's full store disk is offered until a save fails.**
+  A quiet controller node with a full store disk reads ok and is offered
+  for new cntlrs. The first refused request marks it, and a cntlr placed
+  there before that waits for the start hold before it gets a health epoch
+  (section 6.1). A disk node no longer has this limit: its agent tests its
+  store disk with a small write every minute, and a refused write marks
+  the node. State: fix later for a controller node: no like test is
+  planned there yet. Not seen in the lab.
 - **A row's text shows only the start and the end of a long error.** An
   agent cuts every text it puts in a row of its report, or beside one, to
   a fixed length, so that the largest report still fits in one message.
