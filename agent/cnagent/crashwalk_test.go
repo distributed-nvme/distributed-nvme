@@ -628,9 +628,10 @@ func crashTornExpected(lines []string, ran int) bool {
 // crashTornNow reports whether the next agent's pre-pass will tear an
 // uncreated snapshot of a held primary: some, but not all, of its slices'
 // pools hold the snapshot's id now, and the pass makes the rest (CN14). A
-// startup pass cut after it made the last ids loses the mark it set, as a
-// restart does by design (cnagent.md, Known limits), and the pools then read
-// whole.
+// startup pass cut after it made the last ids and before it saved the mark
+// loses the mark, as a restart does by design (cnagent.md, Known limits),
+// and the pools then read whole; one cut after the save keeps it, which
+// crashTornSaved reads.
 func crashTornNow(node *fakeNode, held crashHeld) bool {
 	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
 	node.mu.Lock()
@@ -1494,8 +1495,9 @@ const (
 // so only the calls that change the node are cut. At each of those cuts,
 // before the gate ends the second agent, every round and syncup of the held
 // objects must answer that it is starting (dnagent.md SH33). The torn mark
-// is expected from the pools before the third agent (crashTornNow), and the
-// dump files from both cut works. The second agent ran a startup pass over
+// is expected from the pools before the third agent (crashTornNow), or
+// from a tear the converge's cut left whose mark the startup pass saved
+// before its cut (crashTornSaved), and the dump files from both cut works. The second agent ran a startup pass over
 // the held objects, so its late calls (crashGate.late) show work of a
 // startup pass that outlives the process.
 func TestACrashDuringTheStartupPassAfterACut(t *testing.T) {
@@ -1590,6 +1592,11 @@ func (sh crashShape) cutStartupAfter(
 	if failure != "" {
 		return crashOutcome{failure: failure}
 	}
+	// The converge's cut can tear the snapshot (some slices hold its id);
+	// the startup pass then makes the rest and marks the tear, and its cut
+	// after the mark's save keeps the mark though the pools read whole by
+	// then.
+	tornByCut := crashTornNow(node, sh.held)
 	inc := startCrashInc(node)
 	defer inc.end()
 	inc.gate.arm("startup-1", false, second.k, second.after)
@@ -1620,12 +1627,36 @@ func (sh crashShape) cutStartupAfter(
 	out := sh.restartAndJudge(node, inc.gate, ref, []crashWork{
 		{lines: convLines, ran: ran},
 		{lines: pass, ran: crashRan(second)},
-	}, crashTornNow(node, sh.held), "startup-2")
+	}, crashTornNow(node, sh.held) ||
+		tornByCut && crashTornSaved(node, sh.held), "startup-2")
 	if late := ended.lateCalls(); late > 0 && out.failure == "" {
 		out.failure = fmt.Sprintf("the first agent tried %d calls after "+
 			"its end, on a context its end did not cancel", late)
 	}
 	return out
+}
+
+// crashTornSaved reports whether the local store holds a torn mark of a held
+// primary's cntlr: what a startup pass saved before its cut, which the next
+// agent loads (CN2, CN14).
+func crashTornSaved(node *fakeNode, held crashHeld) bool {
+	nf := common.NewNameFmt(common.DefaultLocalStorPrefix)
+	node.mu.Lock()
+	defer node.mu.Unlock()
+	for _, req := range held.cntlrs {
+		if !req.GetCntlr().GetPrimary() {
+			continue
+		}
+		raw, ok := node.protos[nf.LocalTornPath(req.GetClusterId(),
+			req.GetCnId(), req.GetCntlrPointer().GetSpId(),
+			req.GetCntlrPointer().GetCntlrId())]
+		marks := &pb.TornMarks{}
+		if ok && proto.Unmarshal(raw, marks) == nil &&
+			len(marks.GetTdIdList()) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // startCalls counts node's calls but the boot check's reads, which Prepare

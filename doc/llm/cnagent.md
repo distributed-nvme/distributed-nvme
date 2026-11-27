@@ -1090,6 +1090,38 @@ whether or not the connect worked, makes the converge walk again before
 its next lookup, since the subsystem the connect made may hold the number
 of an entry freed since the walk.
 
+**The head is looked up again around its number.** A converge reads the
+number its leg wrapper maps from "/sys/block/<name>/dev", by the head
+name its last lookup of the leg found, and takes it only once one more
+lookup of the leg, in the pass's walk and made after that read, finds
+the same head (`legHeadNo`). A head that changed, or that lookup failing,
+fails the leg for the pass, and the wrapper is left as it is. Reason: the
+steps between the lookup and the wrapper's — the in-sync test of the other
+member before a cut, whose read of the array in sysfs can wait seconds
+behind a dead leg (`Md.Detail`; The cut of a migrating leg's path, below),
+when no cut follows it and so no lookup, the disconnect of a dead path
+(below) and a primary's rescan of a stale path with its pauses (The write
+cache of a leg's path, below) — can take seconds. A head's name holds its
+subsystem's number ("nvme<subsystem>n<head>"), the number of the
+subsystem's first controller, which the kernel frees with the subsystem
+and gives to the next new controller; one that starts a new subsystem,
+which another cntlr's converge, running beside this one, or a dn agent on
+the same machine can connect meanwhile, can name that subsystem's head
+as the leg's was named. A number read by the old name would be that head's,
+and the wrapper would map another pool's leg. The lookup before the read
+and the one after it bound the read of the name: the name must pass to
+another subsystem and back to the leg between them to get past. They do
+not bound the number itself up to the wrapper's create, a few reads later
+in the step: a head that goes in that time frees its number, which the
+next new block device can take (Known limits). The second lookup is the
+plain one, and it reads no path's write cache: the primary's write cache
+step keeps the view it read that cache in. A wrapper that exists holds its
+head open, so the kernel frees neither the head nor its subsystem; the
+case is a leg with no wrapper yet, as at its first build or for a
+repair's new leg. The read builds nothing, and its number read
+(`wrapperStepOf`) takes no second lookup. A clone source's number read
+takes none either (CN18, step 3; Known limits).
+
 **The connect step waits, briefly and boundedly, for what it has just
 asked for.** A primary's connect to a new side can reach the disk node
 before its export is linked into the port — the worker's sides-first hold
@@ -7207,6 +7239,18 @@ stores instead is CN23's.
 
 ## Known limits
 
+* A leg's wrapper can still map another device in a window of a few reads
+  (CN10, The head is looked up again around its number): the second
+  lookup proves the head's name, and the number read by it, up to that
+  lookup; if the leg's last controller goes between it and the wrapper's
+  create, with no wrapper yet to hold the head, the head's number is freed
+  and the next new block device can take it before the create. A check
+  after the create, which then holds the device, would close it; it is not
+  built. A clone source's number has the same race over the longer window
+  of steps 1 to 3 (CN18), with no second lookup at all: at a clone's first
+  build nothing of the cntlr holds the source head, and a source the node
+  pass cuts as unused (CN21) frees its name and number for another
+  connection, which the dm-clone would then copy from.
 * The cut of a migrating leg's path (CN10) leaves three cases. A
   destination that dies inside the migration's gap, while both paths read
   inaccessible, leaves a down path whose last ANA state is inaccessible,

@@ -545,7 +545,7 @@ func (s *CnAgentServer) ensureLeg(
 			return nil, err
 		}
 	}
-	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
+	headNo, err := s.legHeadNo(ctx, plan, lp, view)
 	if err != nil {
 		return nil, err
 	}
@@ -567,6 +567,44 @@ func (s *CnAgentServer) ensureLeg(
 		}
 	}
 	return view, nil
+}
+
+// legHeadNo is the number ensureLeg builds lp's wrapper over (CN10, The head
+// is looked up again): the number read by the head name view holds, taken
+// only once a second lookup of the leg, made after that read in the pass's
+// walk, names the same head. The steps between the lookup that named the
+// head and the wrapper's — the other member's in-sync test before a cut, a
+// dead path's disconnect, a primary's rescan and its pauses — can take
+// seconds, and a head's name holds its subsystem's number, which the
+// kernel frees with the leg's subsystem and gives to the next new
+// controller: another cntlr's converge, which runs beside this one, or a
+// dn agent on the machine can connect one meanwhile, and a number read by
+// the old name would be that connection's head, another pool's leg. The
+// lookup before the read and the one after it bound the read of the name;
+// the number can still be freed between the second lookup and the
+// wrapper's create (cnagent.md, Known limits). A head that changed, or a
+// second lookup that fails, fails the leg for the pass, as any other step
+// of it does. view itself is kept: the second lookup reads no path's write
+// cache, which a primary's write cache step reads from view.
+func (s *CnAgentServer) legHeadNo(
+	ctx context.Context,
+	plan *cntlrPlan,
+	lp *legPlan,
+	view *subsysView,
+) (string, error) {
+	headNo, err := s.blockDevNo(ctx, path.Base(view.nsDev))
+	if err != nil {
+		return "", err
+	}
+	again, err := s.lookupSubsys(ctx, plan.walk, lp.nqn, sideNsid)
+	if err != nil {
+		return "", err
+	}
+	if again.nsDev != view.nsDev {
+		return "", fmt.Errorf("the head of %s changed from %q to %q "+
+			"before its wrapper's step", lp.nqn, view.nsDev, again.nsDev)
+	}
+	return headNo, nil
 }
 
 // freshenWrapper is the rest of a primary's write cache step on lp (CN10,

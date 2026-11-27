@@ -642,13 +642,19 @@ the bad leg of a cancelled repair that comes back with old data (section
   the thin pool's records miss the other primary's writes: a block written
   then reads as zeros, and the next commit writes the old records over the
   newer ones. State: fix later. Read from dnv's code; not seen in the lab.
-- **A leg's device can be built over the wrong connection.** Silent. The primary
-  puts a device over each leg it connects. It reads the device number of
-  the leg's connection by the kernel's name for that connection, after a
-  slow step and with no second look. The kernel can give a freed name to
-  another connection in that time, and the leg's device then maps another
-  connection's device, which can be another pool's leg. It needs that rare
-  race. State: fix decided. Read from dnv's code; not seen in the lab.
+- **A leg's device or a clone's copy can still be built over the wrong
+  connection in a short window.** Silent. The primary puts a device over
+  each leg it connects, by the number of the leg's connection, which it
+  reads by the kernel's name for that connection. It now checks the name
+  again right after it reads the number, so the long steps before are
+  covered. The number itself is not checked again up to the moment the
+  device is made, a few quick reads later: if the leg's connection goes in
+  that moment, and nothing holds it yet, as at a leg's first build, the
+  kernel can give its number to a new device, and the leg's device maps
+  that one, which can be another pool's leg. A clone's copy is built over
+  its source's connection the same way, with no second check at all and
+  over a longer time, so a new clone can copy another pool's volume.
+  State: fix later. Read from dnv's code; not seen in the lab.
 - **A torn snapshot can read as whole.** Silent. A snapshot is taken slice
   by slice. A primary crash between two slices, or a slice whose step was
   skipped or failed, leaves a torn snapshot. The agent marks it torn and

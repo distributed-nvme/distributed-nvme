@@ -834,10 +834,13 @@ func TestNoHeadWaitWithoutAConnect(t *testing.T) {
 	assertErrorDetails(t, reply.GetCntlrInfo().GetLegIdToLeg()[testDataLeg],
 		"no multipath namespace", "leg data")
 	assertNoCall(t, node, "cmd nvme connect")
-	if got := listings(); got != withHead {
-		t.Fatalf("the headless pass listed %s %d times, the headed one %d: "+
-			"a subsystem this pass did not connect was waited for",
-			dir, got, withHead)
+	// The headed pass lists the entry once more, at the lookup after the
+	// head's number read (CN10, The head is looked up again around its
+	// number), which a pass with no head never reaches.
+	if got := listings(); got != withHead-1 {
+		t.Fatalf("the headless pass listed %s %d times, the headed one %d "+
+			"with its second lookup: a subsystem this pass did not "+
+			"connect was waited for", dir, got, withHead)
 	}
 	if waited := clock.Now().Sub(start); waited != 0 {
 		t.Fatalf("the passes waited %v, want none", waited)

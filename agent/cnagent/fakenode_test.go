@@ -272,6 +272,11 @@ type fakeNode struct {
 	// stops answering, say, which the pass's re-read after the connect then
 	// meets. It must not take the lock.
 	duringConnect map[string]func()
+	// duringDisconnect runs, under the fake's lock, when a disconnect of one
+	// controller by device (`nvme disconnect --device <name>`) has dropped
+	// it: what else changes on the node while that slow step runs. It must
+	// not take the lock.
+	duringDisconnect map[string]func()
 	// nsHeadAt stages a subsystem's multipath namespace head, keyed by NQN:
 	// the connect that creates the subsystem adds its controller but not
 	// the head, whose steps show on the listings of the subsystem directory
@@ -291,6 +296,10 @@ type fakeNode struct {
 	// take it.
 	afterList map[string]func()
 	afterRead map[string]func()
+	// beforeRead is afterRead run right before a file read of the exact
+	// path takes its answer, so the change shows in that answer: a head's
+	// name given to another subsystem just before its number is read, say.
+	beforeRead map[string]func()
 
 	// thinDumps is the scripted `thin_dump` output per pool metadata path;
 	// without one the fake synthesizes an empty document from the pool whose
@@ -583,46 +592,48 @@ type fakeCtrl struct {
 
 func newFakeNode() *fakeNode {
 	f := &fakeNode{
-		devSize:        make(map[string]uint64),
-		devNo:          make(map[string]string),
-		nextMinor:      1,
-		dms:            make(map[string]*fakeDm),
-		thinPools:      make(map[string]map[uint32]bool),
-		heldRoots:      make(map[string]bool),
-		thinMapped:     make(map[string]map[uint32]uint64),
-		thinMapLo:      make(map[string]map[uint32]uint64),
-		infoOmit:       make(map[string]bool),
-		tableOmit:      make(map[string]bool),
-		arrays:         make(map[string]*fakeArray),
-		superblocks:    make(map[string]bool),
-		thinNeedsCheck: make(map[string]bool),
-		thinCheckFails: make(map[string]string),
-		memberArray:    make(map[string]string),
-		assembleDrop:   make(map[string]bool),
-		sbFacts:        make(map[string]fakeSuperblock),
-		bblRefused:     make(map[string]bool),
-		zeroNoEffect:   make(map[string]bool),
-		cloneHydrated:  make(map[string]uint64),
-		dirs:           map[string]bool{common.DefaultLocalStorPrefix: true},
-		files:          make(map[string]string),
-		links:          make(map[string]string),
-		errFiles:       make(map[string]error),
-		protos:         make(map[string][]byte),
-		subsystems:     make(map[string]*fakeSubsys),
-		anaOf:          make(map[string]string),
-		nsIdxOf:        make(map[string]uint32),
-		connectFail:    make(map[string]int),
-		connectTakes:   make(map[string]time.Duration),
-		dialLost:       make(map[string]bool),
-		dialRefused:    make(map[string]int),
-		duringConnect:  make(map[string]func()),
-		nsHeadAt:       make(map[string]headStages),
-		pendingHeads:   make(map[string]*pendingHead),
-		afterList:      make(map[string]func()),
-		afterRead:      make(map[string]func()),
-		thinDumps:      make(map[string]string),
-		failCmd:        make(map[string]string),
-		failCmdAlways:  make(map[string]string),
+		devSize:          make(map[string]uint64),
+		devNo:            make(map[string]string),
+		nextMinor:        1,
+		dms:              make(map[string]*fakeDm),
+		thinPools:        make(map[string]map[uint32]bool),
+		heldRoots:        make(map[string]bool),
+		thinMapped:       make(map[string]map[uint32]uint64),
+		thinMapLo:        make(map[string]map[uint32]uint64),
+		infoOmit:         make(map[string]bool),
+		tableOmit:        make(map[string]bool),
+		arrays:           make(map[string]*fakeArray),
+		superblocks:      make(map[string]bool),
+		thinNeedsCheck:   make(map[string]bool),
+		thinCheckFails:   make(map[string]string),
+		memberArray:      make(map[string]string),
+		assembleDrop:     make(map[string]bool),
+		sbFacts:          make(map[string]fakeSuperblock),
+		bblRefused:       make(map[string]bool),
+		zeroNoEffect:     make(map[string]bool),
+		cloneHydrated:    make(map[string]uint64),
+		dirs:             map[string]bool{common.DefaultLocalStorPrefix: true},
+		files:            make(map[string]string),
+		links:            make(map[string]string),
+		errFiles:         make(map[string]error),
+		protos:           make(map[string][]byte),
+		subsystems:       make(map[string]*fakeSubsys),
+		anaOf:            make(map[string]string),
+		nsIdxOf:          make(map[string]uint32),
+		connectFail:      make(map[string]int),
+		connectTakes:     make(map[string]time.Duration),
+		dialLost:         make(map[string]bool),
+		dialRefused:      make(map[string]int),
+		duringConnect:    make(map[string]func()),
+		duringDisconnect: make(map[string]func()),
+		nsHeadAt:         make(map[string]headStages),
+		pendingHeads:     make(map[string]*pendingHead),
+		afterList:        make(map[string]func()),
+		afterRead:        make(map[string]func()),
+		beforeRead:       make(map[string]func()),
+		thinDumps:        make(map[string]string),
+		failCmd:          make(map[string]string),
+		failCmdAlways:    make(map[string]string),
 
 		killCmd:               make(map[string]bool),
 		killCmdAlways:         make(map[string]bool),
@@ -866,6 +877,10 @@ func (f *fakeNode) readFile(ctx context.Context, path string) (string, error) {
 		// SH15. The local store under --local-store is a
 		// plain-file path and is deliberately not covered by the prefix.
 		f.sysfsNoDeadline = append(f.sysfsNoDeadline, path)
+	}
+	if before := f.beforeRead[path]; before != nil {
+		delete(f.beforeRead, path)
+		before()
 	}
 	data, err := f.fileAnswer(path)
 	if f.stampAttrs != nil {
@@ -4722,6 +4737,10 @@ func (f *fakeNode) nvmeDisconnect(args []string) (string, int) {
 		for _, ctrl := range subsys.ctrls {
 			if ctrl.name == dev {
 				f.dropCtrl(subsys, ctrl)
+				if during := f.duringDisconnect[dev]; during != nil {
+					delete(f.duringDisconnect, dev)
+					during()
+				}
 				return "", 0
 			}
 		}

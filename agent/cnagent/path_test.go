@@ -515,15 +515,17 @@ func TestPathRowsOfAnUnansweredRead(t *testing.T) {
 	}
 }
 
-// TestPathRowsTakeOneLookupPerLeg pins what the rows cost. In a cntlr's
-// read, which a check round answers from, each leg is looked up at most
-// once: a two-sided leg's path rows take the lookup, and the leg's verdict
+// TestPathRowsTakeNoLookupOfTheirOwn pins what the rows cost: they read a
+// lookup the leg's other uses take. In a cntlr's read, which a check round
+// answers from, each leg is looked up at most once: a two-sided leg's path
+// rows take the lookup, and the leg's verdict
 // of the sides the converge would connect (CN30) and a standby's leg row
 // read the same one; a one-sided leg's verdict takes it alone, on a primary
 // only while its row does not read OK, as here, where no probe has run. A
-// converge's rows read the view its connect step took, so its lookup of each
-// leg is the connect step's alone.
-func TestPathRowsTakeOneLookupPerLeg(t *testing.T) {
+// converge's rows read the view its connect step took, so it looks each leg
+// up twice: the connect step's lookup, and the one after the head's number
+// read that its wrapper step takes (CN10).
+func TestPathRowsTakeNoLookupOfTheirOwn(t *testing.T) {
 	for _, tc := range []struct {
 		role    string
 		primary bool
@@ -580,9 +582,10 @@ func TestPathRowsTakeOneLookupPerLeg(t *testing.T) {
 			}
 			for _, legId := range []uint64{
 				testMetaLeg, testDataLeg, testDataLeg2} {
-				if got := countCalls(node, entryOf(legId)); got != 1 {
+				if got := countCalls(node, entryOf(legId)); got != 2 {
 					t.Fatalf("the converge listed leg %#x's entry %d "+
-						"times, want 1: its connect step's lookup",
+						"times, want 2: its connect step's lookup and "+
+						"the one after its head's number read",
 						legId, got)
 				}
 			}
