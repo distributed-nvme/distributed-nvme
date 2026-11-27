@@ -297,6 +297,11 @@ func (s *CnAgentServer) probeCntlr(
 			ctx, plan, sp.poolDataName, poolSegments(sp.effDataGrps))
 		info.SliceIdToData[sp.sliceId] = t.Set(
 			dataKey, sp.poolDataName, status, details)
+		if sp.checking {
+			// CN13, The needs-check mark: the check's own row.
+			info.SliceIdToDmPool[sp.sliceId] = thinCheckRow(st, sp)
+			continue
+		}
 		status, details, reason := s.probePool(ctx, plan, sp)
 		info.SliceIdToDmPool[sp.sliceId] = t.SetReason(
 			poolKey, sp.poolFinalName, status, details, reason)
@@ -343,6 +348,12 @@ func (s *CnAgentServer) probeCntlr(
 			if sp.deferred {
 				thinInfo.SliceIdToDmThin[sp.sliceId] = t.Provisioning(
 					key, name, detailsProvisioning)
+				continue
+			}
+			if sp.checking {
+				// CN13, The needs-check mark, as the converge reads it.
+				thinInfo.SliceIdToDmThin[sp.sliceId] = t.Provisioning(
+					key, name, detailsThinCheck)
 				continue
 			}
 			status, details := s.probeThin(ctx, plan, tp, sp)

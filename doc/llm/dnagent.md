@@ -317,7 +317,9 @@ because rule ids never shift: code comments cite them.) A role server MAY
 run goroutines outside any RPC: the DN12 fence timer, the DN9 side-zeroing
 workers, the background reads the check rounds start (SH29), the CN11 leg
 probers, the CN10 path watchers, the cn sweep's background
-`nvme disconnect` (`cnagent.md` CN10) and CN34's fence watch loop. The DN12 fence timer is the one of
+`nvme disconnect` (`cnagent.md` CN10), CN34's fence watch loop and the cn's
+checks of a thin pool's metadata (`cnagent.md` CN13, The needs-check
+mark). The DN12 fence timer is the one of
 them that runs a converge. Every one of them derives its ctx from the
 server's **`rootCtx`** — the process-lifetime ctx, which `Serve` derives
 from its own ctx, hands the server before the gRPC listener opens (SH33)
@@ -338,11 +340,13 @@ A background task may additionally run a **child process**: DN9's
 `blkdiscard --zeroout` batches do, so can the converge the DN12 fence
 timer runs, so do the
 background reads, whose probes run commands (SH17),
+the cn's metadata checks run `thin_check`,
 and the cn sweep's background `nvme disconnect` is one.
 Such a child must not outlive the agent — the cn sweep's background
 `nvme disconnect` (below) is allowed to — so the dn server registers every
 goroutine that owns one, its background reads included, in a wait group
-before it starts and exposes a `WaitBackground` that waits for them; a
+before it starts and exposes a `WaitBackground` that waits for them, and
+the cn server does so for its metadata checks; a
 registration and the start of that wait take one lock, so the join waits
 for every task that registered before it and none registers once it has
 begun — a task that would start then is refused, and the next process's
@@ -360,8 +364,9 @@ once and skips the join (CM4): a zeroing child can then outlive the agent,
 holding its side device open until its batch ends, and the next start's
 reconcile meets it as after a kill (below).
 
-**Only child-owning tasks are waited for.** The cn passes a nil
-`waitBackground`: a CN11 prober's IO is a direct, uninterruptible syscall
+**Only child-owning tasks are waited for.** The cn's `waitBackground`
+joins its metadata checks alone, whose `thin_check` holds the meta concat
+open: a CN11 prober's IO is a direct, uninterruptible syscall
 (`cnagent.md`, Leg-probe IO leaves the `OsClient`), so joining it could hang
 shutdown forever — cancelling is the whole contract there. Nor is the child
 of the cn sweep's background `nvme disconnect` joined (`cnagent.md` CN10):
@@ -1483,8 +1488,8 @@ then says. A cancelled read stores nothing. At most one read of an object
 runs at a time: a read counts as running until it stores its observation
 or, storing none, until it ends. The dn enrolls
 each read in its wait group, because a read runs child processes (SH27);
-the cn joins none, as it joins none of its tasks: a read's children hold
-nothing a restarted agent needs. Reason: the worker stays the only driver
+the cn joins none, as it joins only its checks of thin-pool metadata: a
+read's children hold nothing a restarted agent needs. Reason: the worker stays the only driver
 of node reads, so the agent needs no period of its own and never learns the
 cluster's interval. Cost: a round answers what an earlier read or converge
 found, so a change on the node reaches the worker one round later than a
@@ -1803,8 +1808,9 @@ the cut mode (`cnagent.md` CN-CM2); build the role server
 `agent.Serve` with the role's prepare step (SH33) and reconcile, a register
 func that calls `pb.RegisterDiskNodeAgentServer` (resp.
 `pb.RegisterControllerNodeAgentServer`), and the role's SH27 background
-waiter — the dn passes its `WaitBackground`, the cn passes nil (its probers
-are cancelled, never joined, and neither its sweep's background
+waiter — the dn passes its `WaitBackground`, the cn its `WaitBackground`,
+which joins its checks of thin-pool metadata alone (its probers are
+cancelled, never joined, and neither its sweep's background
 `nvme disconnect` nor its background reads are joined — SH27). Transport is
 plaintext (`grpc.md`, Wiring). No flag is marked required through cobra:
 "required" is checked after the viper binding, so a config file or env var

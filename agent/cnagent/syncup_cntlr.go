@@ -251,7 +251,7 @@ func (s *CnAgentServer) convergeCntlr(
 		// architecture.md, Common validation, not this.
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
-	plan := newCntlrPlan(s.nf, req)
+	plan := newCntlrPlan(s.nf, req, thinChecking(st))
 	applyFence(plan, st)
 	// CN12: a forced-start mark acts only from a request that counts as
 	// delivered (cntlrState.reqFromRpc). Any other held request is the
@@ -302,6 +302,9 @@ func (s *CnAgentServer) convergeCntlr(
 	s.keepFenceWatch(st, cntlrKey(req.GetClusterId(), req.GetCnId(),
 		req.GetCntlrPointer().GetSpId(), req.GetCntlrPointer().GetCntlrId()),
 		plan)
+	// CN13, The needs-check mark: the runs of slices whose pools this pass
+	// does not build stop before the sweep tears their concats down.
+	s.keepThinChecks(st, plan)
 	// CN10: the pass's NVMe walk, the sweep's list of connections and where
 	// the build's lookups find their entries until the build marks it stale.
 	plan.walk = s.newPassWalk(ctx)
@@ -314,6 +317,7 @@ func (s *CnAgentServer) convergeCntlr(
 	if termMismatch(st, plan) {
 		if s.termStep(ctx, st, plan) == termTearDown {
 			standby := standbyPlanOf(s.nf, plan)
+			s.keepThinChecks(st, standby)
 			sweep := s.sweepCntlr(ctx, st, standby, true, nil, nil, nil)
 			if !sweep.Clean() {
 				slog.WarnContext(ctx, msgTermTeardownLeft,
@@ -650,6 +654,11 @@ func (s *CnAgentServer) build(
 				// [D15]: no pool, so no thin volume in this slice.
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Provisioning(
 					key, name, detailsProvisioning)
+			case sp.checking:
+				// CN13, The needs-check mark: the pool waits for its
+				// metadata check.
+				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Provisioning(
+					key, name, detailsThinCheck)
 			case !poolReady[sp.sliceId]:
 				thinInfo.SliceIdToDmThin[sp.sliceId] = st.tracker.Missing(
 					key, name, "thin pool missing")

@@ -558,13 +558,18 @@ Safe steps:
    errors over the list's regions: see "A forced start whose stop failed".
 6. Step the level back:
    `dnvctl sp set-level --level READWRITE`, or the level the pool had.
-7. Write to a volume from a host. If a thin pool comes back read-only, its
-   row under `slice_id_to_dm_pool` in `dnvctl cntlr inspect` says why: for
-   the reason `RES_REASON_POOL_NEEDS_CHECK`, follow
-   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata); for a
-   row that reads ok while its details hold `ro` and no `needs_check`, the
-   metadata is full: follow step 4 of [A pool's space](#a-pools-space); for
-   any other, stop.
+7. Wait until each thin pool's row under `slice_id_to_dm_pool` in
+   `dnvctl cntlr inspect` reads ok. A row that reads
+   `RES_STATUS_PROVISIONING` with the details `checking the thin pool's
+   metadata` is the primary's check of metadata that carries the needs a
+   check mark: wait for it
+   ([Repair a thin pool's metadata](#repair-a-thin-pools-metadata)). Then
+   write to a volume from a host. If a thin pool comes back read-only, its
+   row says why: for the reason `RES_REASON_POOL_NEEDS_CHECK`, the worker
+   fails the primary over and the new primary checks the metadata, so wait
+   and read the row again; for a row that reads ok while its details hold
+   `ro` and no `needs_check`, the metadata is full: follow step 4 of
+   [A pool's space](#a-pools-space); for any other, stop.
 
 Steps that can lose data:
 
@@ -1609,8 +1614,8 @@ says `ro`. Auto-grow adds metadata to it, unless auto-grow is off for the
 pool, and the volume then builds. Stop when the read keeps failing for
 another cause: the node misses a tool or one of its options, which is a
 node fault, or the pool's row reads `RES_REASON_POOL_NEEDS_CHECK`, a pool
-that waits for a check of its records and needs its own repair first, or
-auto-grow is off. Ask for help, and do not delete the id.
+that waits for a check of its records ([Repair a thin pool's
+metadata](#repair-a-thin-pools-metadata)), or auto-grow is off. Ask for help, and do not delete the id.
 
 Tested: the cn suite plants an id with data, sends a new volume over it,
 reads the refusal, deletes the id and sees the volume build. A unit test
@@ -2839,9 +2844,10 @@ the hosts' reads and writes that reach those groups fail, and a write that
 failed may or may not be on the volume. When
 such a group is a data
 group, a commit of the slice's thin pool under writes then leaves the thin
-pool read-only, and it stays read-only after the table goes, until you
-take the steps of [Repair a thin pool's
-metadata](#repair-a-thin-pools-metadata). When it is the slice's meta
+pool read-only, and it stays read-only after the table goes, until the
+worker fails the primary over and the new primary checks the metadata
+([Repair a thin pool's metadata](#repair-a-thin-pools-metadata)). When it
+is the slice's meta
 group, a commit under writes then fails the thin pool, and the blocks it
 mapped since its last commit can be lost with no error ([the scope
 page](scope.md#4-data-loss-dnv-accepts)). The pool's IO then stays failed,
@@ -3217,10 +3223,12 @@ suite takes back a group that waits on a real disk node.
 Words: a thin pool's **metadata** is dm-thin's record of which blocks of the
 pool each volume uses. It lives on the slice's meta group. When dm-thin
 fails to commit it, dm-thin writes a mark into the metadata that it **needs
-a check** (`needs_check`). The mark stays in the metadata, so every
-controller node then opens that thin pool read-only. The tools here,
-`thin_check` and `thin_repair`, come with thin-provisioning-tools, whose
-`thin_dump` the cn agent already runs.
+a check** (`needs_check`), and keeps the loaded thin pool read-only. The
+mark stays in the metadata, so dm-thin would open the thin pool read-only
+again on any controller node. dnv therefore checks the metadata before it
+loads a thin pool whose metadata carries the mark, as LVM does at each
+activation of a thin pool. The check is `thin_check` of
+thin-provisioning-tools, whose `thin_dump` the cn agent already runs.
 
 Symptom: a write to the pool's volumes fails when it needs a new block of
 the thin pool, or lands on a block that a snapshot shares; other writes and
@@ -3236,98 +3244,68 @@ reason `RES_REASON_POOL_FAILED`, a thin pool that dm-thin failed, which a
 failover cures; and a line with `ro` and no `needs_check`, metadata that is
 full ([A pool's space](#a-pools-space)).
 
-What dnv does alone: the worker starts no failover and no cntlr replacement
-for this row, since every controller node would open the pool the same way.
-It logs `reaction skipped` with the reason `shared_state` at its passes.
-This lasts until you act. An error row of another kind in the same report,
-such as a broken group, still brings a failover.
+What dnv does alone: the worker fails the primary over at the primary
+threshold, or replaces a pool's only cntlr at the cntlr threshold. Before
+the new primary loads the thin pool, it reads the mark and runs
+`thin_check` on the metadata; the slice's row reads
+`RES_STATUS_PROVISIONING`, with the details `checking the thin pool's
+metadata`, and every volume of the pool waits. When the check passes, it
+clears the mark, and the primary loads the pool writable, with the data of
+its last commit. When the check refuses the metadata three times in a row,
+the row reads `RES_STATUS_ERROR` with the reason
+`RES_REASON_POOL_META_DAMAGED`, the pool stays down, and the worker starts
+no further failover for it, since every controller node would meet the
+same metadata: stop and ask for help. A check that ends without a
+pass runs again 30 seconds later; a check that cannot read the metadata,
+as when another process holds its device open or the device gives an IO
+error, counts as no refusal. You need the
+steps below only when no failover comes, as at a level where reactions
+stop: the primary runs the same check when a level step brings the thin
+pool back.
 
 Safe steps:
 
-1. Find the slice's meta group. `dnvctl sp get` lists the slices in
-   `slice_list`, in the order of the slice ids in `sp_conf.slice_id_list`.
-   The slice's `meta_grp_list` must hold one group: note its `grp_id`. With
-   more than one, stop.
-2. Step the level to `NO_THINPOOL`:
+1. Step the level to `NO_THINPOOL`:
    `dnvctl sp set-level --level NO_THINPOOL`. The primary takes the thin
    pools away and keeps the group arrays. Hosts get IO errors, and no
    reaction runs.
-3. Wait until `dnvctl cntlr inspect --id <primary cntlr id>` shows
+2. Wait until `dnvctl cntlr inspect --id <primary cntlr id>` shows
    `applied_revision` at least the `sp_rev.revision` of `dnvctl sp get`,
    the slice's row under `slice_id_to_dm_pool` as `RES_STATUS_MISSING` with
    the reason `RES_REASON_SP_LEVEL`, and each row of the slice's groups
    under `grp_id_to_md_raid` as `RES_STATUS_OK`. A data group that broke
    comes back here once its legs serve
    ([A broken array that comes back by itself](#a-broken-array-that-comes-back-by-itself)).
-4. Note the metadata's device: the `res_name` of the meta group's row under
-   `cntlr_info.grp_id_to_md_raid`, keyed by its `grp_id`. In a RAID1 pool
-   it is the path of the group's array, such as `/dev/md/<name>`. In a pool
-   without RAID it is the name of a device mapper device, whose path is
-   `/dev/mapper/<res_name>`. At this level that device holds the whole
-   metadata of the slice's thin pool. Run the next steps as root on the
-   primary's controller node, the `addr_port` of the primary in
-   `dnvctl sp get`.
-5. Check it: `thin_check <metadata device>`. It passes on metadata that
-   only carries the mark. If it fails, stop.
-6. Make a new device of the same size, a loop device over a new file on a
-   local file system with room, outside the agent's `--local-store`
-   directory:
+3. Step the level back: `dnvctl sp set-level --level READWRITE`, or the
+   level the pool had. The slice's row reads `RES_STATUS_PROVISIONING`
+   with the details `checking the thin pool's metadata` while the primary
+   checks the metadata. Wait until it reads `RES_STATUS_OK` and its
+   details show `rw`.
+4. Write to a volume from a host, and read back data it held before.
 
-   ```
-   truncate -s $(blockdev --getsize64 <metadata device>) <file>
-   losetup -f --show <file>
-   ```
+Steps that can lose data: none. No step writes the metadata by hand, and
+`thin_check` clears the mark only when its check of the whole metadata
+passes.
 
-   The second command prints the loop device's path.
-7. Repair onto it and check the copy:
-   `thin_repair -i <metadata device> -o <loop device>`, then
-   `thin_check <loop device>`.
-8. Copy it back over the meta group's device:
-   `dd if=<loop device> of=<metadata device> bs=1M conv=fsync status=none`.
-   dnv builds the thin pool over that device by its name, so the copy back
-   takes the place of a swap of devices. Then remove the loop device with
-   `losetup -d <loop device>` and delete the file.
-9. `thin_check --clear-needs-check-flag <metadata device>`, then
-   `thin_check <metadata device>`. Both must pass.
-10. Check that the mark is gone. Read the metadata's first block with
-    direct IO and print its flags word, whose lowest bit is the mark:
-    `dd if=<metadata device> bs=4096 count=1 iflag=direct status=none | od -A n -t u4 -j 4 -N 4`.
-    It must print an even number; it printed 0 in the lab. Use GNU dd for
-    it: the `dd` of uutils, which some systems ship, handles direct IO
-    wrongly.
-11. Step the level back: `dnvctl sp set-level --level READWRITE`, or the
-    level the pool had. Wait until the slice's row under
-    `slice_id_to_dm_pool` reads `RES_STATUS_OK` and its details show `rw`.
-12. Write to a volume from a host, and read back data it held before.
+When to stop: the slice's row reads `RES_REASON_POOL_META_DAMAGED`; a
+group's row of the slice does not read ok at `NO_THINPOOL`; or the pool
+reads `needs_check` again after step 3.
 
-Steps that can lose data:
-
-- The copy of step 8 overwrites the device it is given. A wrong device,
-  such as a data group's array or another pool's, loses its data. Copy only
-  onto the device of step 4.
-- `thin_repair` over damaged metadata can drop mappings, and the volumes
-  then lose the blocks they mapped. This is not tried; step 5 stops first.
-- A level stepped back before step 8 brings the pool back read-only with
-  the mark. That loses nothing: do the steps again. Never step the level
-  while the copy of step 8 runs: the primary would build the thin pool
-  over metadata that is half copied.
-
-When to stop: the slice has more than one meta group, since then no device
-holds the whole metadata at that level; `thin_check` fails in step 5 or 7;
-a group's row of the slice does not read ok at `NO_THINPOOL`; or the pool
-reads `needs_check` again after step 11.
-
-Tested: the cn agent suite, `integtest/cnagent_test.sh`, case `thinrepair`,
-at the agent level. The suite plays the worker and the gateway: it sends
-the level to the cn agent itself, and it finds the metadata's device with a
-tool of its own, not with `dnvctl cntlr inspect`. Its pool has one cntlr
-and one meta group in a RAID1 slice, and a commit over a broken data group
-makes the mark; the host is disconnected during the steps. Steps 5 to 10
-run as written, step 10 with GNU dd, and the host reads its data after the
-level is back. It passed in the lab on 2026-11-21, every step working. Not
-tested: the steps through `dnvctl` and a worker, a pool with standbys or
-without RAID, metadata that `thin_check` finds damaged, and a slice of more
-than one meta group.
+Tested: the cn agent suite, `integtest/cnagent_test.sh`, at the agent
+level. The suite plays the worker and the gateway: it sends the level and
+the failover to the cn agent itself. Its case `groupcut` cuts every leg of
+a data group for 8 seconds and fails the pool over: the new primary checks
+the metadata and loads the pool writable. Its case `thinrepair` runs the
+steps above on a pool with one cntlr and one meta group in a RAID1 slice,
+where a commit over a broken data group makes the mark; the host is
+disconnected during the steps. The case first damages the metadata's
+superblock at `NO_THINPOOL` and steps the level back: the row reads
+`RES_REASON_POOL_META_DAMAGED` and no thin pool is loaded. It then puts the
+superblock back at `NO_THINPOOL` and steps the level back again: the check
+passes, the pool is writable, and the host reads its data. Both cases
+passed in the lab on 2026-11-27. Not tested: the steps through `dnvctl` and
+a worker, a pool without RAID, and a slice of
+more than one meta group.
 
 ## Change a pool's level
 
@@ -3864,13 +3842,10 @@ Safe steps, the new cntlr first and the delete last:
    primary runs none of the pool's group arrays. Pick `READONLY` when the
    pool must go back to its old level in step 5: hosts then write nothing
    to the pool in between. Do not step the level
-   back while other work holds it there, such as a forced start, the
-   repair of a thin pool's metadata, or a damaged pool taken apart in
-   stages. End that work first, or ask for help
-   ([Before every forced start](#before-every-forced-start);
-   [Repair a thin pool's metadata](#repair-a-thin-pools-metadata),
-   step 8). The wait of step 3 also shows that the new cntlr has the
-   level.
+   back while other work holds it there, such as a forced start or a
+   damaged pool taken apart in stages. End that work first, or ask for
+   help ([Before every forced start](#before-every-forced-start)). The
+   wait of step 3 also shows that the new cntlr has the level.
    Then create the new cntlr: `dnvctl cntlr create --slot <slot>`, with a
    slot of the list that no cntlr of the pool uses, the old one included. Add
    `--cn-black <addr>,<addr>` to keep it off those controller nodes; the

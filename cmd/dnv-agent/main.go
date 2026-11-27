@@ -618,13 +618,15 @@ func runCn(cmd *cobra.Command, args []string) error {
 		func(grpcServer *grpc.Server) {
 			pb.RegisterControllerNodeAgentServer(grpcServer, srv)
 		},
-		// The cn passes nil: its CN11 leg probers are stopped by cancelling
-		// rootCtx and are deliberately never joined — a probe wedged in an
-		// uninterruptible pread would hang shutdown forever, which is the very
-		// starvation the probe-IO carve-out exists to prevent. Nor is the child
-		// of its sweep's background `nvme disconnect`: it holds nothing a
-		// restarted agent needs (cnagent.md CN10).
-		nil)
+		// The cn joins its thin-pool metadata checks, whose `thin_check`
+		// child holds a meta concat open (cnagent.md CN13; dnagent.md SH27).
+		// Its CN11 leg probers are stopped by cancelling rootCtx and are
+		// deliberately never joined — a probe wedged in an uninterruptible
+		// pread would hang shutdown forever, which is the very starvation the
+		// probe-IO carve-out exists to prevent. Nor is the child of its
+		// sweep's background `nvme disconnect`: it holds nothing a restarted
+		// agent needs (cnagent.md CN10).
+		srv.WaitBackground)
 }
 
 // startCut is the cn agent's start check (cnagent.md CN-CM2): it reads

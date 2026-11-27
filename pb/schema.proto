@@ -520,13 +520,13 @@ enum ResReason {
     // bitmap is read only while no namespace on it can take a write
     // (architecture.md, Bitmap reads).
     RES_REASON_PARKED = 6;
-    // A slice's thin pool whose metadata carries dm-thin's needs_check
-    // flag: the pool is read-only and stays so on every node that opens it,
-    // until an operator repairs its metadata. The cn agent sets it on both
-    // channels, on that RES_STATUS_ERROR slice_id_to_dm_pool row, its
-    // details the raw status line (cnagent.md CN13), and the worker's
-    // shared-state class reads it, so no failover or cntlr replacement
-    // follows it (dnv-worker.md HL2).
+    // A slice's thin pool, loaded, whose metadata carries dm-thin's
+    // needs_check flag: the pool is read-only on the node that loaded it.
+    // The cn agent sets it on both channels, on that RES_STATUS_ERROR
+    // slice_id_to_dm_pool row, its details the raw status line (cnagent.md
+    // CN13). It is the cntlr's own fault: a new primary checks the metadata
+    // before it loads the pool and clears the flag when the check passes,
+    // so a failover cures it (dnv-worker.md HL2).
     RES_REASON_POOL_NEEDS_CHECK = 7;
     // A slice's thin pool that dm-thin failed (its status line reads Fail),
     // or whose status read could not read its metadata (Error). The cn agent
@@ -567,6 +567,16 @@ enum ResReason {
     // repair's bad leg only with force_undecided, the operator's judgement
     // of which copy is stale (architecture.md, Repairs).
     RES_REASON_IDENTITY_UNDECIDED = 11;
+    // A slice's thin pool that the primary does not load because thin_check
+    // refused its metadata, which carries dm-thin's needs_check flag, in
+    // three runs in a row: the metadata is damaged (cnagent.md CN13, The
+    // needs-check mark). The cn agent sets it on both channels, on that
+    // RES_STATUS_ERROR slice_id_to_dm_pool row, its details the last
+    // refusal. Every node
+    // meets the same metadata, so the worker's shared-state class reads it
+    // and no failover or cntlr replacement follows it (dnv-worker.md HL2);
+    // the case stays with the operator. Appended, never renumbered.
+    RES_REASON_POOL_META_DAMAGED = 12;
 }
 
 message ResInfo {

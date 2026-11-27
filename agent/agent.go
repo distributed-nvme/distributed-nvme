@@ -37,9 +37,10 @@ import (
 // outlives an agent that exits through it (dnagent.md SH27); an exit on a
 // second signal skips it, and such a child can outlive the agent. Only a
 // role whose background work holds a long-running child that must not
-// outlive it passes one: the dn passes its WaitGroup join, the cn passes
-// nil because its CN11 probers are stopped by cancellation and never joined
-// (a wedged pread is
+// outlive it passes one: the dn passes its WaitGroup join, and the cn its
+// join of the checks of thin-pool metadata, whose `thin_check` holds a
+// metadata device open (cnagent.md CN13), and of nothing else: its CN11
+// probers are stopped by cancellation and never joined (a wedged pread is
 // uninterruptible, so waiting would hang shutdown forever — the very
 // starvation the probe-IO carve-out exists to prevent) and the child of its
 // sweep's background `nvme disconnect` holds nothing a restarted agent needs

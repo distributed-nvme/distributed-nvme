@@ -259,6 +259,12 @@ type slicePlan struct {
 	// (dmutil.go's "concat has no segments"), and [D15] promises PROVISIONING
 	// throughout with no err_epoch.
 	deferred bool
+	// checking means the background check of the slice's thin-pool metadata
+	// holds its pool (CN13, The needs-check mark): a run goes on, or one
+	// failed. The concats are built and the pool is not; the pool's row is
+	// the check's (thinCheckRow), its thin rows read PROVISIONING, and
+	// every td waits, as for a deferred slice (anySliceDeferred).
+	checking bool
 
 	poolMetaName  string
 	poolDataName  string
@@ -679,9 +685,13 @@ type xferPlan struct {
 // Construction
 // ---------------------------------------------------------------------------
 
+// checking, when given, names the slices whose pools their metadata check
+// holds (thinChecking): such a slice is built up to its concats, and every
+// td waits (slicePlan.checking).
 func newCntlrPlan(
 	nf *common.NameFmt,
 	req *pb.SyncupCntlrRequest,
+	checking ...func(sliceId uint64) bool,
 ) *cntlrPlan {
 	ptr := req.GetCntlrPointer()
 	cntlr := req.GetCntlr()
@@ -730,6 +740,13 @@ func newCntlrPlan(
 		level >= pb.SpLevel_SP_LEVEL_READONLY
 
 	p.buildSlices()
+	for _, held := range checking {
+		for _, sp := range p.slices {
+			if held(sp.sliceId) {
+				sp.checking = true
+			}
+		}
+	}
 	p.buildCloneGrps()
 	// [D15]: the effective desired state is computed once every group is
 	// built, the clone meta groups included, since it defers a group by its
@@ -1059,7 +1076,7 @@ func (gp *grpPlan) effective() bool {
 // stripes across every slice's thin volume (CN15).
 func (p *cntlrPlan) anySliceDeferred() bool {
 	for _, sp := range p.slices {
-		if sp.deferred {
+		if sp.deferred || sp.checking {
 			return true
 		}
 	}

@@ -29069,10 +29069,11 @@ react_fsync_kmsg() { # <tag>
 # in turn, its write to slice 0 can come late in the cut, and the pause is
 # logged, not asserted. How the step goes on after a cut is decided by
 # react_gcut_back's read of the pool, on the primary of that moment. A cut
-# that leaves the slice's pool needs_check stops the step, as no flow of dnv
-# repairs it (scope.md's entry "A thin pool whose metadata needs a check, or
-# with corrupt metadata, has no repair flow in dnv"), and the case's status
-# check then allows that one pool row (case_status_check); a cut that leaves the
+# that leaves the slice's pool needs_check stops the step, as only the
+# worker's failover, whose new primary checks the metadata before it loads
+# the pool, brings it back (cnagent.md CN13, The needs-check mark), and the
+# case's status check then allows that one pool row while it lasts
+# (case_status_check); a cut that leaves the
 # pool in any other state but OK stops it too, and the status check judges the
 # pool. The meta groups stay out: a cut whose data legs share a disk node with
 # a meta group's leg is not made, and the step stops cutting there. The case
@@ -29108,7 +29109,8 @@ GCUT_WAY_POOL=""
 
 # react_gcut_back is true once host0's writer has ended and the primary
 # reports every cut group's array OK, not degraded and with no sync
-# running, or its slice's pool needs_check, which nothing brings back. The
+# running, or its slice's pool needs_check, which only a failover brings
+# back. The
 # reading is logged as it changes, and its pool line kept in GCUT_POOL.
 react_gcut_back() { # <slice id> <grp ids…>
 	local slice=$1 out g st det pool sig
@@ -29180,8 +29182,9 @@ react_gcut_groups_pool() { # <min rev> <slice id> <grp ids…>
 }
 
 # react_gcut_way_back brings the cut groups' arrays back after a cut that
-# left the slice's pool other than OK, needs_check above all, which no step
-# of dnv makes writable again. First the step gives the worker the primary
+# left the slice's pool other than OK, needs_check above all, which the
+# worker's failover makes writable again once the new primary's check of the
+# metadata passes (cnagent.md CN13). First the step gives the worker the primary
 # threshold and REACT_GCUT_REACT_WAIT more to move the primary role, as a
 # broken group's row sets the primary's health epoch, and logs whether it did;
 # a primary that holds the broken arrays with the pool over them cannot stop
@@ -29189,8 +29192,8 @@ react_gcut_groups_pool() { # <min rev> <slice id> <grp ids…>
 # on a primary whose layers above hold the broken array), so where the groups
 # are still not whole the pool goes to the level that builds no thin pool,
 # where the primary's re-assembly starts them again (cnagent.md CN12, The
-# re-assembly), and back to the read-write level, where the pool opens again
-# with its needs_check mark.
+# re-assembly), and back to the read-write level, where the primary checks
+# the metadata before it loads the pool.
 REACT_GCUT_REACT_WAIT=60
 react_gcut_way_back() { # <wmark> <slice id> <grp ids…>
 	local wmark=$1 slice=$2 t0 fo rev st
@@ -29402,8 +29405,8 @@ react_group_cut() {
 		"RES_STATUS_OK "*) ;;
 		*needs_check*)
 			STATUS_ALLOW_NEEDS_CHECK=$slice
-			log "  cut $i left slice 0's pool needs_check, which no step of dnv" \
-				"repairs; the step stops cutting"
+			log "  cut $i left slice 0's pool needs_check, which only a" \
+				"failover's check of the metadata cures; the step stops cutting"
 			react_gcut_way_back "$wmark" "$slice" "${grps[@]}"
 			break
 			;;
@@ -29425,7 +29428,7 @@ react_group_cut() {
 			*needs_check*)
 				STATUS_ALLOW_NEEDS_CHECK=$slice
 				log "  the pool reads needs_check on the primary it has now," \
-					"as the cut left it; no step of dnv repairs it"
+					"as the cut left it, until a failover's check of the metadata"
 				;;
 			esac
 			break

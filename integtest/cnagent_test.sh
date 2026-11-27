@@ -38,8 +38,8 @@
 # preceded by a cache drop. Do not "fix" this back to direct IO. The IO that
 # must be direct — isolation's writes, groupcut's read back, repair's badstop
 # reads of the data array (md_data_chunk) and of the host's MiB 0, and
-# thinrepair's superblock read (tr_sb_flags) — goes through GNU dd, `gnudd`,
-# whose direct flags work.
+# thinrepair's superblock reads and writes (tr_sb_flags, tr_sb_damage,
+# tr_sb_restore) — goes through GNU dd, `gnudd`, whose direct flags work.
 #
 # Both roles run from one binary named `dnv-agent`, so `pkill -x dnv-agent`
 # would kill both (cnagent_integtest.md, Topology). Every kill here is
@@ -2190,26 +2190,49 @@ md_bad_block_add() {
 	echo
 }
 
-# The thinrepair case's new metadata device: a loop device over a file.
-TR_META_FILE=$WORK/tr-meta.bin
+# The thinrepair case's copy of the metadata superblock it damages.
+TR_SB_KEEP=$WORK/tr-sb-keep.bin
 
-# tr_meta_make <bytes> makes the thinrepair case's new metadata device, a
-# loop device over a new file of <bytes>, and prints its path.
-tr_meta_make() {
-	tr_meta_drop >/dev/null
-	truncate -s "$1" "$TR_META_FILE" || return 1
-	losetup -f --show "$TR_META_FILE"
+# tr_sb_damage <dev> keeps the thin-pool metadata superblock of <dev>, its
+# first 4 KiB, in TR_SB_KEEP, then writes it back with byte 2048 changed: a
+# byte of the superblock's unused tail, which its checksum covers and the
+# magic number and the flags word do not, so the needs-check mark still
+# reads and thin_check refuses the superblock. Direct IO both ways (gnudd);
+# prints "damaged".
+tr_sb_damage() {
+	local bad=$WORK/tr-sb-bad.bin
+	gnudd if="$1" of="$TR_SB_KEEP" bs=4096 count=1 iflag=direct status=none ||
+		return 1
+	cp "$TR_SB_KEEP" "$bad" || return 1
+	printf '\xa5' | gnudd of="$bad" bs=1 seek=2048 count=1 conv=notrunc \
+		status=none || return 1
+	if cmp -s "$TR_SB_KEEP" "$bad"; then
+		rm -f "$bad"
+		echo "tr_sb_damage: byte 2048 of $1's superblock already reads 0xa5" >&2
+		return 1
+	fi
+	gnudd if="$bad" of="$1" bs=4096 count=1 oflag=direct conv=fsync \
+		status=none || return 1
+	rm -f "$bad"
+	echo damaged
 }
 
-# tr_meta_drop takes the thinrepair case's new metadata device and its file
-# away, whatever is left of them; prints "dropped".
-tr_meta_drop() {
-	local l
-	for l in $(losetup -j "$TR_META_FILE" 2>/dev/null | cut -d: -f1); do
-		losetup -d "$l" 2>/dev/null
-	done
-	rm -f "$TR_META_FILE"
-	echo dropped
+# tr_sb_restore <dev> writes the superblock tr_sb_damage kept back over the
+# first 4 KiB of <dev> with direct IO, reads it back to compare and removes
+# the copy; prints "restored".
+tr_sb_restore() {
+	local back=$WORK/tr-sb-back.bin
+	gnudd if="$TR_SB_KEEP" of="$1" bs=4096 count=1 oflag=direct conv=fsync \
+		status=none || return 1
+	gnudd if="$1" of="$back" bs=4096 count=1 iflag=direct status=none ||
+		return 1
+	if ! cmp -s "$TR_SB_KEEP" "$back"; then
+		rm -f "$back"
+		echo "tr_sb_restore: $1 does not read back the kept superblock" >&2
+		return 1
+	fi
+	rm -f "$back" "$TR_SB_KEEP"
+	echo restored
 }
 
 # tr_sb_flags <dev> — the thin-pool metadata superblock of <dev>, read with
@@ -4467,7 +4490,7 @@ cleanup_phase1() { # <cn16> [other vm ip]
 	hostw_stop >/dev/null
 	ncg_teardown >/dev/null
 	rm -f "$MD_HOLD_FLAG"
-	tr_meta_drop >/dev/null
+	rm -f "$TR_SB_KEEP"
 	unpin_all
 	unthrottle >/dev/null
 	if [ -n "${2:-}" ]; then
@@ -6377,6 +6400,35 @@ resync_until_clean() { # cnidx sp cntlr rev req secs label
 		[ "$SECONDS" -lt "$deadline" ] ||
 			die "$7: after $6 s cn$1's check round reads '$got'"
 		sleep 1
+	done
+}
+
+# pool_row_wait <cnidx> <sp> <cntlr> <req> <want> <secs> <label> plays the
+# worker on a cntlr (dnv-worker.md RW4) until the pool row of the slice
+# A_SLICE reads <want>, "<status> <reason>", which it leaves in POOL_ROW: a
+# fresh check round, and while it answers the leftover code, the
+# SyncupCntlr re-sent (cntlr_resend); it dies after <secs> s. The check of a
+# thin pool's metadata names no row while it runs, so a clean round does not
+# end the wait: the round names the pool when a check may run again, and the
+# absent pool once a check has passed (cnagent.md CN13, The needs-check
+# mark).
+pool_row_wait() {
+	local idx=$1 sp=$2 c=$3 req=$4 want=$5 secs=$6 label=$7 out code row
+	local deadline=$((SECONDS + secs))
+	while :; do
+		out=$(cnctl "$idx" check-cntlr --fresh --show-info \
+			--revision "${CNREV[$idx]}" --sp "$sp" --cntlr "$c" \
+			--expect-code 4 2>/dev/null || true)
+		code=$(jq_of "$out" '.agent_reply.code // 0')
+		row=$(jq_of "$out" ".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$A_SLICE")\"] | \"\(.status) \(.reason // \"RES_REASON_NONE\")\"")
+		if [ "$row" = "$want" ]; then
+			POOL_ROW=$row
+			return 0
+		fi
+		[ "$SECONDS" -lt "$deadline" ] ||
+			die "$label: after $secs s cn$idx's pool row reads '$row' (code $code), want '$want'"
+		[ "$code" != 4 ] || cntlr_resend "$idx" "$req" "$label"
+		sleep 2
 	done
 }
 
@@ -10198,7 +10250,16 @@ repair_reassembly() {
 	done
 	bump_cn_rev 2
 	rev2=${CNREV[2]}
-	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+	# A commit of the pool over the broken array sets dm-thin's needs-check
+	# mark in its metadata, as the lab shows, and the primary then checks the
+	# metadata before it loads the pool, the converge answering the pool's
+	# row PROVISIONING (cnagent.md CN13, The needs-check mark). The wait plays
+	# the worker until the pool's row reads OK.
+	log "  repair reassembly: the level back up answers the pool's row" \
+		"$(jq_of "$out" ".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$A_SLICE")\"].status")"
+	pool_row_wait 2 "$sp" "$c2" "$req2" "RES_STATUS_OK RES_REASON_NONE" 120 \
+		"repair reassembly: the pool back"
 	resync_until_clean 2 "$sp" "$c2" "$rev2" "$req2" 60 \
 		"repair reassembly: the pool back"
 	host_wait_ana "$hv" "$nqn" 2 optimized 30
@@ -14024,8 +14085,9 @@ case_pause() {
 # ---------------------------------------------------------------------------
 
 # GCUT_MODE picks what the groupcut case runs (cnagent_integtest.md, Cases,
-# groupcut): "gate", the default, one cut of GCUT_GATE_SECS, whose outcome
-# the case asserts; "measure", one cut of each length of GCUT_MEASURE_SECS,
+# groupcut): "gate", the default, one cut of GCUT_GATE_SECS and one of
+# GCUT_CHECK_SECS, whose outcomes the case asserts; "measure", one cut of
+# each length of GCUT_MEASURE_SECS,
 # each over a fresh pool, whose numbers the docs carry. GCUT_OUT is where
 # each cut keeps its raw files on the driver. GCUT_GATE_SECS and
 # GCUT_BACK_SECS may be set, as the gate is shown failing with a cut that
@@ -14034,6 +14096,16 @@ case_pause() {
 GCUT_MODE=${GCUT_MODE:-gate}
 GCUT_OUT=${GCUT_OUT:-$WORK/groupcut}
 GCUT_GATE_SECS=${GCUT_GATE_SECS:-3}
+# The second gate cut, long enough that the pool's commit fails over the
+# broken data array and dm-thin sets its needs-check mark: the failover's
+# new primary checks the metadata, clears the mark and loads the pool
+# writable (cnagent.md CN13, The needs-check mark). GCUT_CHECK_WAIT bounds
+# the wait for CN1's pool row to read OK after the promote.
+GCUT_CHECK_SECS=${GCUT_CHECK_SECS:-8}
+GCUT_CHECK_WAIT=120
+# The details of a pool row while the primary checks the metadata
+# (detailsThinCheck in agent/cnagent/thincheck.go).
+GCUT_CHECK_DETAILS="checking the thin pool's metadata"
 GCUT_MEASURE_SECS="3 8 20 60"
 # One pool a cut, its thin device GCUT_BLOCKS of the pool's blocks long, the
 # writer's whole range at a write every half second.
@@ -14175,7 +14247,33 @@ gcut_failover() {
 	code=no-reply
 	[ -z "$out" ] || code=$(jq_of "$out" '.agent_reply.code // 0')
 	log "  groupcut $i: the promote answers code $code"
-	rows=$(gcut_rows 1 "$sp" "$c1" "${CNREV[1]}")
+	# A pool whose metadata carries dm-thin's needs-check mark is not loaded:
+	# the converge that reads the mark starts the check and answers the
+	# pool's row PROVISIONING with the check's details (cnagent.md CN13, The
+	# needs-check mark). The check of the suite's small metadata can end
+	# before the case's next read, so the promote's own reply counts, and so
+	# does any read of the loop. The loop plays the worker: it re-sends CN1's
+	# request only when the read answers the leftover code, as once the check
+	# has passed the read names the absent pool, until the pool's row reads
+	# OK, for up to GCUT_CHECK_WAIT s.
+	local checked=no deadline=$((SECONDS + GCUT_CHECK_WAIT)) s16
+	s16=$(d16 "$A_SLICE")
+	[ -z "$out" ] ||
+		[ "$(jq_of "$out" ".cntlr_info.slice_id_to_dm_pool[\"$s16\"] | \"\(.status) \(.details // \"\")\"")" != \
+			"RES_STATUS_PROVISIONING $GCUT_CHECK_DETAILS" ] || checked=yes
+	while :; do
+		rows=$(gcut_rows 1 "$sp" "$c1" "${CNREV[1]}")
+		case "$rows" in
+		*" pool=OK"*) break ;;
+		*" pool=PROVISIONING[$GCUT_CHECK_DETAILS]"*) checked=yes ;;
+		esac
+		[ "$SECONDS" -lt "$deadline" ] || break
+		sleep 2
+		case "$rows" in
+		*" code=4")
+			cn_syncup_cntlr 1 "$req1" --expect-code 4 >/dev/null 2>&1 || true ;;
+		esac
+	done
 	flags=$(gcut_pool_flags 1 "$(cn_dm_name c2 1 "$sp" "$A_SLICE")")
 	if helper 2 "wait_ana '$nqn' '${IP[1]}' optimized 30" >/dev/null 2>&1; then
 		ana=optimized
@@ -14190,8 +14288,9 @@ gcut_failover() {
 		;;
 	esac
 	log "  groupcut $i: after the failover CN1 reads $rows; its pool '$flags';" \
-		"the host's path to it $ana; a new write $probe"
-	GCUT_FO="failover=[pool=$flags path=$ana write=$probe $rows]"
+		"the metadata checked: $checked; the host's path to it $ana; a new" \
+		"write $probe"
+	GCUT_FO="failover=[pool=$flags checked=$checked path=$ana write=$probe $rows]"
 }
 
 # gcut_run <i> <secs> <req1> <req2> <nqn> <dev> — one cut over pool <i>:
@@ -14283,8 +14382,11 @@ gcut_run() {
 	readback=*/*" lost=-") ;;
 	*) log "  groupcut $i: WARNING a write the host was told was done is lost or unread: $rb" ;;
 	esac
-	[ "$GCUT_MODE" != gate ] ||
+	if [ "$GCUT_MODE" = gate ] && [ "$i" = 2 ]; then
+		gcut_check_gate "$i" "$secs" "$sum" "$back" "$fo" "$rb"
+	elif [ "$GCUT_MODE" = gate ]; then
 		gcut_gate_check "$i" "$secs" "$sum" "$back" "$flags" "$rb"
+	fi
 
 	stage "cut${i}down" "pool $i torn down"
 	host_disconnect 2 "$nqn"
@@ -14367,11 +14469,51 @@ gcut_gate_check() {
 	die "groupcut $i: the gate failed ${#bad[@]} check(s): $sum"
 }
 
+# gcut_check_gate <i> <secs> <summary> <back> <failover> <readback> — what
+# the rule promises of a cut long enough to fail the pool's commit
+# (cnagent_integtest.md, Cases, groupcut; cnagent.md CN13, The needs-check
+# mark): no write came back on CN2, so the failover ran; CN1 checked the
+# metadata, its pool row reading PROVISIONING meanwhile, and then loaded the
+# pool writable with no needs_check; the host's path to CN1 is optimized and
+# a new write there succeeds; and every acknowledged block reads back. Every
+# check that fails is named, then the stage fails.
+gcut_check_gate() {
+	local i=$1 secs=$2 sum=$3 back=$4 fo=$5 rb=$6 bad=()
+	[ "$back" = none ] ||
+		bad+=("a write came back on CN2 after the $secs s cut, so the pool's commit did not fail")
+	case "$fo" in
+	"failover=["*) ;;
+	*) bad+=("no failover was played") ;;
+	esac
+	case "$fo" in
+	*" checked=yes "*) ;;
+	*) bad+=("CN1's pool row never read PROVISIONING, so no check of the metadata was seen") ;;
+	esac
+	case "$fo" in
+	*needs_check* | *"pool=Fail"* | *"pool=Error"*)
+		bad+=("CN1's pool reads needs_check or failed after the failover") ;;
+	*"pool=rw "* | *"pool=rw]"*) ;;
+	*) bad+=("CN1's pool does not read rw after the failover") ;;
+	esac
+	case "$fo" in
+	*" path=optimized write=rc=0 "*) ;;
+	*) bad+=("the host's new write through CN1 did not succeed") ;;
+	esac
+	case "$rb" in
+	readback=*/*" lost=-") ;;
+	*) bad+=("a block the host was told was written does not read back: $rb") ;;
+	esac
+	[ "${#bad[@]}" -eq 0 ] && return 0
+	local b
+	for b in "${bad[@]}"; do log "  groupcut $i: GATE $b"; done
+	die "groupcut $i: the check gate failed ${#bad[@]} check(s): $sum $fo"
+}
+
 case_groupcut() {
 	CASE=groupcut
 	local i=0 secs list nqn req1 req2 dev
 	case "$GCUT_MODE" in
-	gate) list=$GCUT_GATE_SECS ;;
+	gate) list="$GCUT_GATE_SECS $GCUT_CHECK_SECS" ;;
 	measure) list=$GCUT_MEASURE_SECS ;;
 	*) die "groupcut: GCUT_MODE is '$GCUT_MODE', want gate or measure" ;;
 	esac
@@ -14407,22 +14549,11 @@ TR_SP=0x451
 TR_UUID=aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaa0451
 TR_TD2=0x1e
 
-# tr_step <label> <cmd…> — one step of the repair by hand on vm2, its exit
-# status and output logged as "THINREPAIR <label> rc=<n>: <output>", and the
-# status returned, and the whole output logged when the step failed; the case
-# dies on a step of the procedure of operations.md, Repair a thin pool's
-# metadata, that fails. It adds two checks after the copy back: a cmp of the
-# two devices, which must pass, and a thin_check, which it only logs.
-tr_step() {
-	local label=$1 out rc=0
-	shift
-	out=$(sshv 2 "$*" 2>&1) || rc=$?
-	log "THINREPAIR $label rc=$rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)"
-	if [ "$rc" != 0 ]; then
-		printf '%s\n' "$out" | sed 's/^/  THINREPAIR | /' >&2
-	fi
-	return "$rc"
-}
+# TR_DAMAGE_WAIT bounds the wait for CN2's pool row to read the metadata
+# damaged, three refusals 30 s apart; TR_CHECK_WAIT the wait for it to read
+# OK after a check that passes.
+TR_DAMAGE_WAIT=150
+TR_CHECK_WAIT=120
 
 case_thinrepair() {
 	CASE=thinrepair
@@ -14430,14 +14561,12 @@ case_thinrepair() {
 	SIDE_PROVISIONED=()
 	local sp=$TR_SP c2=0x2 hv=2 nqn="$NQN_IT_PREFIX:tr:vol1"
 	local req2="$WORK/req-thinrepair-cn2.json" out dev want l st flags pool
-	local lin meta md2 mdmeta deadline grp size sb newmeta
+	local lin meta md2 mdmeta deadline grp size sb t0
 	dev=$(host_dev "$TR_UUID")
 	pool=$(cn_dm_name c2 2 "$sp" "$A_SLICE")
 	diag_cntlr 2 "$sp" "$c2"
-	for l in thin_check thin_repair; do
-		[ -n "$(sshv 2 "command -v $l || true")" ] ||
-			die "thinrepair: vm2 has no $l (thin-provisioning-tools)"
-	done
+	[ -n "$(sshv 2 "command -v thin_check || true")" ] ||
+		die "thinrepair: vm2 has no thin_check (thin-provisioning-tools)"
 
 	stage build "the A-shaped pool, primary CN2; 8 MiB written and committed"
 	dn_pointers 1 "$sp:${A_MLEG[1]}:${A_MSIDE[1]}" "$sp:${A_DLEG[1]}:${A_DSIDE[1]}"
@@ -14538,57 +14667,70 @@ case_thinrepair() {
 	(((${sb##*flags=} & 1) == 1)) ||
 		die "thinrepair: $meta's superblock carries no needs_check flag: $sb"
 
-	stage repair "thin_check, thin_repair onto a new metadata device, its check, the copy back over the meta group's array, the flag cleared"
-	# dnv builds the pool over the meta group's array by its name, and no
-	# request names another metadata device, so the swap of a repaired
-	# device for the old one is the copy back over the array. Each step of
-	# the procedure of operations.md, Repair a thin pool's metadata, must
-	# work, as the doc says, or the case fails there; a failing run leaves
-	# the new device for the cleanup (tr_meta_drop).
-	tr_step "thin_check (the flag set)" "thin_check $meta" ||
-		die "thinrepair: thin_check of $meta, which carries only the mark, failed (the procedure's check before the repair)"
-	newmeta=$(helper 2 "tr_meta_make $size") ||
-		die "thinrepair: making the new metadata device failed: $newmeta"
-	tr_step "thin_repair onto the new device $newmeta" \
-		"thin_repair -i $meta -o $newmeta" ||
-		die "thinrepair: thin_repair from $meta onto $newmeta failed (the procedure's repair onto a new device)"
-	tr_step "thin_check of the new device" "thin_check $newmeta" ||
-		die "thinrepair: the repaired metadata on $newmeta does not check clean (the procedure's check of the new device)"
-	tr_step "the copy back onto $meta" \
-		"dd if=$newmeta of=$meta bs=1M conv=fsync status=none" ||
-		die "thinrepair: the copy back from $newmeta onto $meta failed (the procedure's copy back)"
-	tr_step "the copy back compared" "cmp $newmeta $meta" ||
-		die "thinrepair: $meta does not hold what $newmeta holds after the copy back (the procedure's copy back)"
-	log "THINREPAIR repair: $meta's superblock after the copy: $(helper 2 "tr_sb_flags $meta")"
-	assert_eq "$(helper 2 tr_meta_drop)" dropped \
-		"thinrepair: the new metadata device taken away"
-	# Not a step of the procedure: logged only.
-	tr_step "thin_check after the copy" "thin_check $meta" || true
-	tr_step "thin_check --clear-needs-check-flag" \
-		"thin_check --clear-needs-check-flag $meta" ||
-		die "thinrepair: clearing the mark on $meta failed (the procedure's clear of the mark)"
-	tr_step "thin_check at the end" "thin_check $meta" ||
-		die "thinrepair: $meta does not check clean after the steps (the procedure's last check)"
-	sb=$(helper 2 "tr_sb_flags $meta") ||
-		die "thinrepair: reading $meta's superblock failed: $sb"
-	log "THINREPAIR repair: $meta's superblock at the end: $sb"
-	(((${sb##*flags=} & 1) == 0)) ||
-		die "thinrepair: $meta's superblock still carries the needs_check flag after the steps: $sb"
-
-	stage back "the level back up: the pool writable over the repaired metadata, and the host reads its data"
+	stage damaged "the superblock damaged at the level with no thin pool, then the level back up: thin_check refuses the metadata, and the pool stays unbuilt, its row naming damaged metadata"
+	# One byte of the superblock's unused tail changed (tr_sb_damage): CN2
+	# still reads the mark, and thin_check refuses the superblock's
+	# checksum. CN2 reads the metadata damaged after three refusals in a
+	# row, 30 s apart (cnagent.md CN13, The needs-check mark), each next run
+	# started by the re-send that the read's name of the pool brings.
+	assert_eq "$(helper 2 "tr_sb_damage $meta")" damaged \
+		"thinrepair: the superblock of $meta damaged"
 	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
 	bump_cn_rev 2
+	t0=$SECONDS
+	cntlr_resend 2 "$req2" "thinrepair: the level up over damaged metadata"
+	pool_row_wait 2 "$sp" "$c2" "$req2" \
+		"RES_STATUS_ERROR RES_REASON_POOL_META_DAMAGED" "$TR_DAMAGE_WAIT" \
+		"thinrepair: the level up over damaged metadata"
+	log "THINREPAIR damaged: CN2's pool row reads $POOL_ROW after $((SECONDS - t0)) s"
+	assert_eq "$(helper 2 "dm_state '$pool'")" missing \
+		"thinrepair: no thin pool over damaged metadata"
+	sb=$(helper 2 "tr_sb_flags $meta") ||
+		die "thinrepair: reading $meta's superblock failed: $sb"
+	(((${sb##*flags=} & 1) == 1)) ||
+		die "thinrepair: a refused check cleared the mark on $meta: $sb"
+
+	stage restored "the level with no thin pool again, and the superblock put back"
+	req_set "$req2" '.sp_level = "SP_LEVEL_NO_THINPOOL"'
+	bump_cn_rev 2
 	cn_syncup_cntlr 2 "$req2" --expect-code 4 >/dev/null 2>&1 || true
+	resync_until_clean 2 "$sp" "$c2" "${CNREV[2]}" "$req2" 60 \
+		"thinrepair: the level with no thin pool again"
+	assert_eq "$(helper 2 "tr_sb_restore $meta")" restored \
+		"thinrepair: the superblock of $meta put back"
+	sb=$(helper 2 "tr_sb_flags $meta") ||
+		die "thinrepair: reading $meta's superblock failed: $sb"
+	log "THINREPAIR restored: $meta's superblock: $sb"
+	(((${sb##*flags=} & 1) == 1)) ||
+		die "thinrepair: $meta's superblock lost the mark when put back: $sb"
+
+	stage back "the level back up: CN2 checks the metadata, clears the mark and loads the pool writable, and the host reads its data"
+	# The converge that finds the pool absent reads the mark, starts the
+	# check and answers the pool's row PROVISIONING; the read names the
+	# absent pool once the check has passed, and the re-send loads it.
+	req_set "$req2" '.sp_level = "SP_LEVEL_READWRITE"'
+	bump_cn_rev 2
+	out=$(cn_syncup_cntlr 2 "$req2" --expect-code 4 2>/dev/null || true)
+	assert_eq "$(jq_of "$out" ".cntlr_info.slice_id_to_dm_pool[\"$(d16 "$A_SLICE")\"].status")" \
+		RES_STATUS_PROVISIONING \
+		"thinrepair: CN2's pool row at the converge that starts the check"
+	pool_row_wait 2 "$sp" "$c2" "$req2" "RES_STATUS_OK RES_REASON_NONE" \
+		"$TR_CHECK_WAIT" "thinrepair: the level back up"
 	resync_until_clean 2 "$sp" "$c2" "${CNREV[2]}" "$req2" 60 \
 		"thinrepair: the level back up"
 	flags=$(gcut_pool_flags 2 "$pool")
 	log "THINREPAIR back: the pool's status: $flags"
 	case " $flags " in
 	*" needs_check "* | *" ro "* | *Fail*)
-		die "thinrepair: the pool reads '$flags' after the repair" ;;
+		die "thinrepair: the pool reads '$flags' after the check" ;;
 	*" rw "*) ;;
 	*) die "thinrepair: the pool reads '$flags', want rw" ;;
 	esac
+	sb=$(helper 2 "tr_sb_flags $meta") ||
+		die "thinrepair: reading $meta's superblock failed: $sb"
+	log "THINREPAIR back: $meta's superblock: $sb"
+	(((${sb##*flags=} & 1) == 0)) ||
+		die "thinrepair: $meta's superblock still carries the mark after the check: $sb"
 	host_connect "$hv" 2 "$nqn"
 	helper "$hv" "wait_dev '$dev' 20" >/dev/null || die "no device node $dev on vm$hv"
 	host_wait_ana "$hv" "$nqn" 2 optimized 20
@@ -14596,7 +14738,7 @@ case_thinrepair() {
 	assert_eq "$(sha_range "$hv" "$dev" 8)" "$want" \
 		"thinrepair: the data written before the fault"
 	assert_eq "$(helper "$hv" "write_probe '$dev' 16")" ok \
-		"thinrepair: a new write after the repair"
+		"thinrepair: a new write after the check"
 
 	stage teardown "empty cntlr list, then empty side lists"
 	host_disconnect "$hv" "$nqn"

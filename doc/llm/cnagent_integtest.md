@@ -111,7 +111,7 @@ which the agent does, then checks each module loaded or built in; the tools,
 GNU dd under the name `gnudd` among them, through which alone the suite
 makes IO with direct flags (isolation's writes, groupcut's read back,
 repair's badstop reads of the data array and of the host's first MiB, and
-thinrepair's read of the metadata superblock),
+thinrepair's reads and writes of the metadata superblock),
 as the VMs' own dd gives false failures with them (`dnagent_integtest.md`,
 Assumptions and preflight checks), lvm2's and bcache-tools' only for
 redund's foreign stage, which makes a
@@ -133,7 +133,7 @@ modules, as the lab's controller node VMs do; on any other pair its
 preflight fails. iptables and
 tc are left to the stages that use them, the partition stages, redund's dial
 and slow leg stages, pause's and groupcut's cuts and clone_xfer's slowed
-copy, and thin_check and thin_repair to thinrepair, so a VM
+copy, and thin_check to thinrepair, so a VM
 without one fails in the stage that needs it rather than a run that might
 never reach one.
 
@@ -988,7 +988,12 @@ by a write through the array itself, with the exports back, the array is
 named by a fresh check round, by its node under its own kind (`cnagent.md`
 CN30), and the `SyncupCntlr` re-sent as the worker would assembles it
 again. The pool comes back at the level that builds it, and the host reads
-its data unchanged. Before its teardown, with the arrays stopped, every
+its data unchanged: a commit of the pool over the broken array sets
+dm-thin's needs-check mark, as the lab shows, so the primary checks the
+metadata before it loads the pool (`cnagent.md` CN13, The needs-check
+mark), and the case reads the primary, re-sending its request on the
+leftover code as the worker does, until the pool's row reads OK. Before its
+teardown, with the arrays stopped, every
 member of the data group is zeroed by hand, as a forced start cut short
 after its zeroing leaves them, and the request carries the flag that the
 group's array has run: the primary creates no array over the blank legs
@@ -1279,7 +1284,15 @@ onto CN1, none of whose leg paths the cut reached, recording CN1's rows,
 its pool's status line, the host's path to CN1 and, where the pool takes
 writes, one new write. Then it reads back, with direct IO, every block a
 write of which the host was told was done, through the primary that serves
-then, and compares each with its write. The default run is one cut of 3 s,
+then, and compares each with its write. After a failover it notes whether
+the pool's row read PROVISIONING with the check's details, as a converge
+that starts CN1's check of the metadata answers it (`cnagent.md` CN13, The
+needs-check mark), in the promote's own reply, since the check of the
+suite's small metadata can end before the next read, or in a later read;
+it reads CN1 until the pool's row reads OK, for at most
+`GCUT_CHECK_WAIT`, and re-sends CN1's request only when a read answers the
+leftover code, as the worker does, the read naming the absent pool once
+the check has passed. The default run is one cut of 3 s,
 which passes only if a write was held for about the cut's length, so the
 rule held a leg path the writes need (a rule aimed at another port fails
 it), no write failed, writes came back on CN2, every acknowledged block
@@ -1287,7 +1300,11 @@ reads back and the pool reads writable with no needs_check flag; the gate
 names every check that fails, but reads the held write only where no write
 failed, as a failed write shows the rule held a leg path too, and a block
 rewritten behind the read back, a gate cut of 20 s (`GCUT_GATE_SECS`) and a
-wait for writes back of no time (`GCUT_BACK_SECS`) each fail it. With
+wait for writes back of no time (`GCUT_BACK_SECS`) each fail it; then one
+cut of 8 s (`GCUT_CHECK_SECS`), which passes only if no write came back on
+CN2, the failover ran, CN1's pool row read PROVISIONING with the check's
+details and then the pool read writable with no needs_check, the host's new write through CN1
+succeeded and every acknowledged block reads back. With
 `GCUT_MODE=measure` and `--only groupcut` the case cuts for 3, 8, 20 and 60 s,
 each over a fresh pool, counts rather than fails a block that does not read
 back, and prints and keeps each cut's files and summary on the driver: a cut
@@ -1297,47 +1314,44 @@ first member 9.6 to 10.2 s after the cut's mark, at the first leg's
 teardown, and marked the array broken at the second's, which leaves that
 member in sync with a write error (`cnagent.md` CN29), the array reading
 broken 15.3 to 15.9 s after the mark; writes failed from 14.9 to 15.5 s
-after it, the pool read read-only with needs_check,
-every acknowledged block read back as written, and the failover brought
-both arrays back and the pool read-only with needs_check.
+after it, the pool read read-only with needs_check, and
+every acknowledged block read back as written; the failover brought both
+arrays back.
 
-**thinrepair** is the repair by hand of a thin pool whose metadata carries
-needs_check (`architecture.md`, Known limits, No thin-metadata repair path
-is specified), its steps run on a real kernel, each logged with its exit
-status and, when it fails, with its whole output, and each step of the
-procedure of `operations.md`, Repair a thin pool's metadata, required to
-pass, so that the case fails at the first one that does not. The A shape's
-pool, its primary on CN2 alone and one meta group, takes 8 MiB from the
-host; then both data legs' exports to CN2 error
-every IO, as repair's reassembly stage does it, a host write breaks the data
-array (`cnagent.md` CN29), and a request with a new volume, whose creation
-is a pool message that commits the pool (CN14), fails that commit over the
-broken array: the pool reads read-only with needs_check, its row
+**thinrepair** is the repair of a thin pool whose metadata carries
+needs_check by a level step, which the operator takes when no failover
+comes (`operations.md`, Repair a thin pool's metadata), and the primary's
+refusal of metadata that `thin_check` finds damaged (`cnagent.md` CN13, The
+needs-check mark). The A shape's pool, its primary on CN2 alone and one
+meta group, takes 8 MiB from the host; then both data legs' exports to CN2
+error every IO, as repair's reassembly stage does it, a host write breaks
+the data array (`cnagent.md` CN29), and a request with a new volume, whose
+creation is a pool message that commits the pool (CN14), fails that commit
+over the broken array: the pool reads read-only with needs_check, its row
 `RES_STATUS_ERROR` with `RES_REASON_POOL_NEEDS_CHECK` (CN13). With the
 exports back, the level with no thin pool takes the pool's devices away and
 lets the primary assemble the data array again (CN12, The re-assembly); the
 meta group's array is then the metadata's whole device, and the flags word
-of its superblock, read with direct IO, carries needs_check. On CN2's VM the
-case runs `thin_check` on it, `thin_repair` from it onto a new device, a
-loop device over a file of the array's size, `thin_check` of the new device,
-the new device copied back onto the array, which `cmp` must then find
-equal to the new device, `thin_check`, `thin_check
---clear-needs-check-flag` and a last `thin_check`, every one of which must
-pass but the `thin_check` right after the copy back, which the procedure
-does not have and the case only logs, and the superblock's flags word must
-then read no needs_check; the new device and its file stay for the cleanup
-when a step fails. The level back up
-builds a pool that reads writable with no needs_check flag, the host reads
-its 8 MiB as written and writes again. On the lab `thin_repair`'s output
-carried no needs_check: the flags word read none after the copy back, before
-the clear. The new device is copied back rather than swapped in, as the
-primary builds the pool over the meta group's array by its name and no
-request names another metadata device. The metadata is intact with the flag
-set, so `thin_check` passes before the repair too: a repair of corrupt
-metadata is not tried. With the repair steps left out the flags check fails,
-and with that check left out as well the level back up reads the pool
-read-only with needs_check. A pool of more than one meta group, whose
-metadata no one device holds at that level, is not tried.
+of its superblock, read with direct IO, carries needs_check. The case then
+keeps the superblock and changes one byte of its unused tail, which its
+checksum covers and the magic number and the flags word do not, and steps
+the level back up, playing the worker: a fresh check round, and the
+request re-sent while the round answers the leftover code. CN2 reads the
+mark, its `thin_check` refuses the superblock three times in a row, each
+next run started by the re-send the read's name of the pool brings once
+the pause is over, and the pool's row reads `RES_STATUS_ERROR` with
+`RES_REASON_POOL_META_DAMAGED`, the pool not loaded and the mark still set,
+within `TR_DAMAGE_WAIT`. At the level with no thin pool again, which
+drops the agent's record of the refusals, the case writes the kept
+superblock back and reads it back equal, the mark set. The level back up
+then answers the pool's row `RES_STATUS_PROVISIONING` at the converge that
+starts the check; the check passes and clears the mark, the round names the
+absent pool, the re-send loads it, and within `TR_CHECK_WAIT` the
+row reads `RES_STATUS_OK`, the pool writable with no needs_check flag and
+the superblock's flags word with no mark; the host reads its 8 MiB as
+written and writes again. A pool of more than one meta group, whose
+metadata no one device holds at that level, and metadata damaged past its
+superblock are not tried.
 
 **What a pass means.** Exit status zero and PASS mean every assertion held in a
 run that stops at the first failure: data checked against patterns the agents
@@ -1413,9 +1427,9 @@ device is one the stage can reach: an md array whose every member is a dm
 device of dnv, where the signatures land, a dm device of dnv, or one of the
 stage's scratch loop devices, which carry no bcache superblock but are the
 stage's; a bcache device a lab machine uses for its own storage stays.
-thinrepair's new metadata device, a loop device over a file in the suite's
-work folder, is detached and its file removed with the fault injectors,
-at the cleanup's start. Every
+thinrepair's copy of the superblock it damages, a file in the suite's
+work folder, is removed with the fault injectors, at the cleanup's start.
+Every
 suspended dnv device is resumed before anything over it is removed, as one
 wedges its removal, the namespace disable above it and any block scan
 (`architecture.md`, [D12]). md arrays are named through udev, else by

@@ -286,12 +286,15 @@ func modulesLoadNames(text string) []string {
 // (dnagent.md CM5). blockdev is both roles': each agent clears a device's
 // read-only flag with it after a reload (Dm.SetWritable). losetup is the cn
 // agent's: it makes the loop device whose write cache a td's dm-error
-// reports (cnagent.md CN15).
+// reports (cnagent.md CN15). thin_check is the cn agent's too: it checks a
+// slice's thin-pool metadata that carries dm-thin's needs-check mark
+// before the pool loads (cnagent.md CN13).
 var (
 	commandsBoth = []string{"dmsetup", "nvme", "lsblk", "mkdir", "rmdir",
 		"ln", "rm", "blockdev"}
 	commandsDn = []string{"blkdiscard"}
-	commandsCn = []string{"mdadm", "thin_dump", "stat", "losetup"}
+	commandsCn = []string{"mdadm", "thin_dump", "thin_check", "stat",
+		"losetup"}
 )
 
 // thinDumpHeaderFlags are the flags of the cn agent's thin header read

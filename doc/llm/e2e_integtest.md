@@ -1397,13 +1397,16 @@ ended and the primary reads the groups whole or the pool needs_check, through
 the primary of that moment, so the blocks of a cut that broke a group can be
 read through the array md broke, before any failover, and then count as failed
 reads, neither held nor lost. A cut that leaves the slice's pool needs_check
-ends the cutting, as no step of dnv repairs such a pool: the stage gives the
-worker the primary threshold and a minute more to make the groups whole again,
-logs what it did, and otherwise takes the pool to the level that builds no
-thin pool, where the primary's re-assembly starts the arrays again
-(`cnagent.md` CN12, The re-assembly), and back to the read-write level, where
-the pool opens with its mark again; the case's status check then allows that
-pool's row (The ending every case shares). That level step is not exercised:
+ends the cutting, as only the worker's failover brings such a pool back, its
+new primary checking the metadata before it loads the pool (`cnagent.md`
+CN13, The needs-check mark): the stage gives the worker the primary
+threshold and a minute more to make the groups whole again, logs what it
+did, and otherwise takes the pool to the level that builds no thin pool,
+where the primary's re-assembly starts the arrays again (`cnagent.md` CN12,
+The re-assembly), and back to the read-write level, where the primary
+checks the metadata before it loads the pool; the case's status check then
+allows that pool's needs_check row while it lasts (The ending every case
+shares). That level step is not exercised:
 in the lab the worker makes the groups whole first. A cut that leaves the pool
 in any other state but OK, with its groups whole again, ends the cutting too,
 and the status check then judges the pool. How the stage goes on is decided by

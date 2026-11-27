@@ -3195,11 +3195,12 @@ follow the role: the class reads the reason, not the cause, so a failover
 does not repeat a read that can fail on every node, and the node check
 reports a missing tool or option before a node joins (`dnagent.md` CM5). Or
 it is the pool row of a slice that reads `ERROR` with the reason
-`RES_REASON_POOL_NEEDS_CHECK`, a thin row of that slice, or a row of the
-stack of a td whose thin row in that slice does not read `OK`: dm-thin
-keeps needs_check in the pool's metadata, so the pool opens read-only on
-every node until an operator repairs it, and a thin volume it cannot make
-fails there alike (`cnagent.md` CN13). The class reads those fields, never
+`RES_REASON_POOL_META_DAMAGED`, a thin row of that slice, or a row of the
+stack of a td whose thin row in that slice does not read `OK`: the
+primary's `thin_check` of the pool's metadata, which carries dm-thin's
+needs_check, failed, and every node meets the same metadata, so no node
+loads the pool until an operator repairs it (`cnagent.md` CN13, The
+needs-check mark). The class reads those fields, never
 a row's details: a control-plane decision does not parse a tool's English.
 The stack is the td's own rows — its thin rows, its raid0 and its dm-error
 — and every row of an object that exists for it alone: the ns-dev and the
@@ -3211,9 +3212,12 @@ failover brings the td or the pool back: an operator does
 `RES_REASON_POOL_FAILED` — dm-thin failed the loaded pool, or a status read
 could not read its metadata — is not of the class: the failure is a state
 of the loaded pool alone, and a new primary opens the pool from its last
-commit; where needs_check reached the metadata it opens read-only, which
-the class then holds, so a failover over a failed pool can cure it and is
-not repeated over a pool that opens with needs_check. A pool whose metadata
+commit. Nor is one that carries `RES_REASON_POOL_NEEDS_CHECK`, a loaded
+pool serving read-only under dm-thin's needs_check: a new primary checks
+the metadata before it loads the pool and clears the mark when the check
+passes (`cnagent.md` CN13, The needs-check mark), so a failover cures it;
+where the check fails, the damaged metadata the class then holds keeps the
+failover from repeating. A pool whose metadata
 no primary can read fails its build instead, a row of no reason, and only
 AR5's and AR7's second refusals bound what that costs. Every other `ERROR`
 row is the cntlr's **own**. Both classes set `Cntlr.err_epoch` as the rules
@@ -3222,11 +3226,12 @@ AR5 and AR7 alone: a report whose `ERROR` rows are all shared-state is no
 failover trigger, nor a replacement one for a primary with no failover
 candidate. Only a converge's observation carries the lost thin id's reason
 and the reason of a thin id not adopted (`dnagent.md` SH28); both channels
-carry needs_check's. A background read's probe finds the volume absent and
+carry the damaged metadata's. A background read's probe finds the volume absent and
 reads it `MISSING` with empty details and no reason, while the raid0 over
 it still reads `ERROR`, so a report from a read's observation of the same
-loss holds own rows only, unless that slice's pool reads needs_check, which
-holds the stack of every td whose thin row there does not read `OK`. It is
+loss holds own rows only, unless that slice's pool reads its metadata
+damaged, which holds the stack of every td whose thin row there does not
+read `OK`. It is
 the second refusals that bound what those rows cost: AR5's keeps the role
 from moving back and forth over them, and AR7's, once a primary with no
 failover candidate has been replaced over them, keeps its replacement,
@@ -4020,8 +4025,8 @@ end the pass. The pass continues
 past: AR5's no-failover-candidate (AR7's sole-primary variant is defined as
 "AR5 found none" and would otherwise be unreachable); AR5's `shared_state`
 and `same_error`, the first of which can hold for as long as the error
-does — an operator's intervention, for a lost thin id or a pool's
-needs_check — and the second for `cntlr_unhealthy`, save after a failover
+does — an operator's intervention, for a lost thin id or a pool's damaged
+metadata — and the second for `cntlr_unhealthy`, save after a failover
 that hold's bound released, whose hold has no end (AR5) — and
 its `candidate_refuses`, for as long as the standbys' refusals do (HL9),
 a no-candidate case as well; AR6's `grow_pending`,
@@ -4364,8 +4369,8 @@ does (AR7, Known limits):
 * **Shared state.** Every `ERROR` row of its latest report that HL2 judges
   it by (every map of rows but `leg_id_to_leg` and `side_id_to_path`) is of
   HL2's shared-state class: `reaction skipped` (`shared_state`, with the
-  primary's `cntlr_id` and the smallest `slice_id` whose pool reads
-  needs_check, or with none, the smallest `td_id` whose thin id is lost or
+  primary's `cntlr_id` and the smallest `slice_id` whose pool's metadata
+  reads damaged, or with none, the smallest `td_id` whose thin id is lost or
   not adopted), judged ahead of the candidate, so a primary with none logs
   this rather than `no candidate`; nor does AR7 replace such a primary once
   it is due for replacement (AR7). The next primary would read the same
@@ -4375,7 +4380,7 @@ does (AR7, Known limits):
   settling, would lose the role again at `cntlr_unhealthy` — to the peer
   whose standby report had cleared its `err_epoch` — once per window, for
   as long as the td stayed lost, its new id held data or its header read
-  kept failing, or the pool kept its needs_check.
+  kept failing, or the pool's metadata stayed damaged.
 * **The same error.** The failover this coordinator last applied took the
   role from the candidate, the primary's `err_epoch` was set less than
   `cntlr_unhealthy` after that failover, and every `ERROR` row of the
@@ -4675,7 +4680,8 @@ row (`cnagent.md` CN14), so its `ERROR` rows are its own.
   (`shared_state`, with its `old_cntlr_id` and the `slice_id` or `td_id`
   AR5's record names). The replacement would read the same rows from the
   same pool. The report carries the lost-id reason only while it comes from
-  a converge's observation, and needs_check's on both channels (HL2). A `Check*` reply carries an info when the info of the
+  a converge's observation, and the damaged metadata's on both channels
+  (HL2). A `Check*` reply carries an info when the info of the
   observation it answers from differs from the last one its stream sent,
   and always on a fresh stream's first reply (HL5; `dnagent.md` SH26), and
   a read that a later round starts replaces the converge's observation with

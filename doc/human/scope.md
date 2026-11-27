@@ -363,7 +363,8 @@ Three more things belong with case 1:
   host. A failed commit of the slice's thin pool leaves it read-only. When
   the broken group is a data group and the slice's meta group still takes
   writes, a commit under writes turns the thin pool read-only, and a new
-  primary brings the array back but not a writable thin pool. When the
+  primary brings the array back and, once its check of the metadata has
+  passed, a writable thin pool as of the last commit (section 6.1). When the
   broken group is the meta group, the group that holds the slice's thin
   pool metadata, a new primary brings the pool back writable as of its
   last commit. The blocks mapped since are gone with no error. The loss
@@ -374,13 +375,14 @@ Three more things belong with case 1:
   stayed, with the times in
   [the introduction](introduction.md#status-and-limits): a short cut
   only paused the host's writes, a longer one left the thin pool
-  read-only on its primary and after a failover, and no write the host was
-  told was done was lost. In the end-to-end suite, with the worker
+  read-only on its primary, and no write the host was told was done was
+  lost; a failover then brings the pool back writable once the new
+  primary's check of the metadata passes (section 6.1). In the end-to-end suite, with the worker
   running, a cut that lasted 3.06 s paused the host's writes for 3.1 s
   and failed none. One that lasted 8.05 s failed the host's write in
   flight and left the thin pool read-only; the worker then moved the
-  primary role to the standby on its own, which brought the array back
-  but not a writable thin pool. Each length is of one run. In two runs
+  primary role to the standby on its own, which brought the array back.
+  Each length is of one run. In two runs
   that timed the cuts less closely, the shorter cut failed no write either
   and the longer one left the thin pool read-only too. The meta group's
   case is read from the kernel's code. When the paths of a group die a few
@@ -1068,7 +1070,7 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
 | A worker, the gateway or the cdc is down and comes back | Another worker, when one runs, takes the pools after a bounded window. The gateway has no state. Without the cdc, hosts keep their paths and get no path changes. On a host that uses nvme-stas, the lab showed the host keep its paths, and its writes go on with no failure, through 900 seconds with every cdc down, though the kernel gave up the host's connections to the cdcs after about 620 seconds; a longer outage is not tested. A Kubernetes node keeps its paths while a cdc of its list cannot be reached. | The worker's flags `--vote-interval`, 10 at the default, and `--vote-leave-grace-time`, 25: a dead worker counts as gone after twice the interval, and the change then holds for the leave grace time, about 45 seconds in all. A worker that keeps running and has just given pools away waits for them to stop before it starts any pool that a later change gives it in that time: up to 60 seconds for a request in flight, and 60 more when the hand-over of a list of written blocks to a migration's new side or a clone follows it, so up to about two minutes; read from dnv's code. | Bring the program back. Bring a cdc back at once. On a host where a longer outage of every cdc made nvme-stas drop every path of a volume, unmount its file system and mount it again on the new device, which replays its journal; when the mount fails or the kernel log reports an error, unmount it if it is mounted, check it with its own check tool, and mount it again once the check finds nothing more to repair. A failover during a cdc outage leaves hosts on a withdrawn path (section 6.1). State: procedure written, [while the control plane is down](operations.md#while-the-control-plane-is-down). |
 | An agent restarts | The agent rebuilds its desired state from its local store, the files in which it keeps the desired state it last accepted. The kernel keeps the devices. As soon as the program runs again, the agent answers each check round with "starting", an answer that says it is still rebuilding, and while it does, for the start hold at most, the worker starts no failover, cntlr replacement or leg repair because of that node. A controller node agent that stays stopped for longer than one check interval can have its primaries failed over, as for a controller node that is down. | For a stopped agent, `primary_unhealthy` with two check rounds in a row: its rounds fail at once, so a stop a little longer than one `cntlr_interval`, 2 at the default, can already fail a primary over, and a failover comes about 4 to 8 seconds after the agent stops, at the defaults. For an agent that answers "starting", the start hold: the longest time the worker waits for an agent that is still rebuilding, 120 at the default, counted from its first start even when it stops and starts again while it rebuilds or just after, before a check round has judged it, a cluster setting fixed when the cluster is created (`--start-hold-seconds` of `dnvctl cluster create`). | For a planned restart, the steps in [the operations doc](operations.md#a-planned-restart-of-an-agent). A rebuild longer than the start hold, and a reboot that the worker first sees as an agent that answers "starting", are in section 6.1. |
 | A host reboots | Nothing on dnv's side. nvme-stas or the Kubernetes node plugin, the part of dnv's Kubernetes driver that runs on each Kubernetes node, connects the paths again. | None. | See the host actions in section 7. |
-| All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the thin pool comes back read-only and needs the repair by hand ([the operations doc](operations.md#repair-a-thin-pools-metadata)). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
+| All disk nodes of a pool are down at once, as in a switch reload | md marks each array broken under IO. Hosts see IO errors. The broken array makes the primary unhealthy, so the worker fails it over at the primary threshold, even while the nodes are still down. Once the legs are back, the new primary assembles the arrays again. If a data group broke while its meta group still took writes, the new primary checks the thin pool's metadata before it loads the pool, its volumes waiting meanwhile, and then loads it writable; metadata the check finds damaged stays down ([the operations doc](operations.md#repair-a-thin-pools-metadata)). A pool of one cntlr waits for a cntlr replacement at the cntlr threshold. | `primary_unhealthy` for the failover. `cntlr_unhealthy`, 600, for a replacement. | A forced start, when no failover comes. The blocks mapped since the last commit of a broken meta group are gone (accepted case 1). |
 
 ### 6.1 Cases where dnv does not come back alone today
 
@@ -1122,39 +1124,35 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   good, the data on the zeroed legs can be reached only by hand with mdadm.
   State: procedure written, [the forced-start guide](operations.md#the-forced-start-guide), "A group whose every
   leg was wiped". Not seen in the lab.
-- **A thin pool whose metadata needs a check, or with corrupt metadata, has
-  no repair flow in dnv.** A failed commit leaves a slice's thin pool
-  read-only, with dm-thin's mark that its metadata needs a check. The mark
-  is kept in the pool's metadata, so the pool opens read-only on every
-  controller node. The primary reports the
-  pool as an error, and the worker logs it and starts no failover, since a
-  new primary would meet the same pool. A pool that dm-thin failed
-  without that mark, or that is read-only because its metadata is full,
-  is not this case: the first is failed over, since a new primary opens
-  the pool from its last commit, and the second gets more metadata from
-  the auto-grow. Corrupt thin pool metadata has no check and no repair
-  flow in dnv. State: procedure written,
-  [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata),
-  for metadata that thin_check passes, in a slice of one meta group: the
-  level steps, the names of the devices involved, thin_check and
-  thin_repair onto a new device, and its copy back over the meta group's
-  device, its array in a RAID1 pool. Fix decided for a pool with the mark
-  whose metadata thin_check passes, however many meta groups it spans: the
-  primary will check it and clear the mark by itself. Fix later: a repair
-  of metadata that thin_check finds damaged, since no way is tried yet; for
-  it, and until the decided fix for metadata that spans more than one meta
-  group, the procedure says to stop.
+- **Thin pool metadata that thin_check finds damaged has no repair flow in
+  dnv.** A failed commit leaves a slice's thin pool read-only, with
+  dm-thin's mark that its metadata needs a check. The primary reports the
+  pool as an error, and the worker fails it over: before the new primary
+  loads the pool, it runs thin_check on the metadata, clears the mark when
+  the check passes, and loads the pool writable as of its last commit.
+  While the check runs, the pool reads provisioning and every volume of the
+  pool waits. When thin_check finds the metadata damaged, the new primary
+  loads no pool, its row names damaged metadata, and the worker starts no
+  further failover, since every node would meet the same metadata. A pool
+  that dm-thin failed without the mark is failed over too, since a new
+  primary opens the pool from its last commit; one that is read-only
+  because its metadata is full gets more metadata from the auto-grow.
+  State: fix later for damaged metadata, since no way to repair it is
+  tried; the procedure [Repair a thin pool's
+  metadata](operations.md#repair-a-thin-pools-metadata) says to stop then.
+  When no failover comes, as at a level where reactions stop, a step of the
+  pool's level down to the one that builds no thin pool and back runs the
+  same check, as the procedure says.
   Seen in the lab: a pool with the mark opened read-only, a failed pool opened
-  again as writable, and a full one became writable after its metadata grew. A
-  suite case repairs by hand a pool whose metadata needs a check, one whose
-  metadata sits in one group: the pool's level stepped down to the one that
-  builds no thin pool, where the group's array still runs, the check, the
-  repair onto a new device, that device's check, its copy back over the
-  group's array, the mark cleared, and the level stepped back to read-write,
-  the pool writable with its data. The copy back stands in for a swap of the
-  new device, as dnv builds the pool over the group's array. That metadata was
-  intact, so a repair of corrupt metadata is not tried, nor a pool whose
-  metadata spans several groups.
+  again as writable, and a full one became writable after its metadata grew.
+  In the cn agent suite, on 2026-11-27, a cut of every leg of a data group
+  long enough to leave the pool with the mark, and a failover after it,
+  brought the pool back writable with its data. A second case, its metadata
+  in one group, stepped the level down and back: with one byte of the
+  metadata's first block changed, the pool stayed down and its row named
+  damaged metadata; with that block put back, the check passed and the pool
+  came back writable with its data. Damaged metadata past that first block
+  and a pool whose metadata spans several groups are not tried.
 - **A group whose in-sync leg dies during a copy waits for a forced
   start.** A repair finishes once the primary reports the new leg in place,
   while md may still copy onto it. The old leg dies during the copy. md
@@ -2146,7 +2144,7 @@ known today" below says what three of the longer procedures rest on.
 | Create and delete a pool | `dnvctl sp create`, `dnvctl sp delete` | the tutorials | done |
 | Grow a slice | the worker grows it by itself; `dnvctl sp grow-slice` | the operations doc, A pool's space | procedure written |
 | See how full a pool is and how far its volumes overcommit it | `dnvctl sp inspect` | the operations doc, A pool's space | procedure written |
-| Change a pool's level | `dnvctl sp set-level` | the operations doc, [Change a pool's level](operations.md#change-a-pools-level), and [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata) | procedure written; the e2e suite steps the whole ladder down and back, and the cn suite repairs a thin pool's metadata at the agent level |
+| Change a pool's level | `dnvctl sp set-level` | the operations doc, [Change a pool's level](operations.md#change-a-pools-level), and [Repair a thin pool's metadata](operations.md#repair-a-thin-pools-metadata) | procedure written; the e2e suite steps the whole ladder down and back, and the cn suite steps a level down and back over a thin pool whose metadata needs a check, at the agent level |
 | Move a leg to another disk node | `dnvctl migr create`, `migr finish`, `migr cancel`; the worker reads and hands over the leg's list itself | the operations doc, [Move a leg to another disk node](operations.md#move-a-leg-to-another-disk-node); the introduction explains the flow | procedure written; the e2e suite runs a migration to its finish and a cancel with force after a cutover; a forced end of a migration whose disk node is gone is not tested as a whole |
 | Repair a leg by hand | `dnvctl repair create`, `repair finish`, `repair cancel`, `repair abort`; the worker repairs by itself | the operations doc, [Repair a leg by hand](operations.md#repair-a-leg-by-hand) | procedure written; the e2e suite runs two repairs of an operator's on one group |
 | Force-start a group | `dnvctl group inspect` shows what the primary reads from each member, and with `--leg` says what a start from that leg would do or why it would refuse; `dnvctl group force-start`, `dnvctl group set-operator-in-charge` | [the forced-start guide](operations.md#the-forced-start-guide) | procedure written |

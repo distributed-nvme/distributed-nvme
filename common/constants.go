@@ -376,6 +376,21 @@ const (
 	// CmdSoftTimeout, and a stop once md holds a member leaves the array
 	// inactive (cnagent.md CN12).
 	MdBuildTimeout = 15
+	// ThinCheckTimeout bounds, in seconds, each thin_check run of a cn
+	// agent's background check of a slice's thin-pool metadata (cnagent.md
+	// CN13, The needs-check mark): thin_check reads every
+	// mapping of the metadata, which dm-thin caps at 16 GiB, so a run can
+	// take minutes; an hour is far past that and still ends a run that
+	// hangs.
+	ThinCheckTimeout = 3600
+	// ThinCheckConcurrency is how many of those runs a cn agent makes at
+	// once: each holds one of the OsClient's command places for as long as
+	// it runs, so after a switch reload that marked many slices' pools the
+	// checks still leave the agent's other commands their places.
+	// ThinCheckRetrySeconds is how long a slice whose run did not pass
+	// waits before its next run.
+	ThinCheckConcurrency  = 2
+	ThinCheckRetrySeconds = 30
 
 	// The clone pair has no defaults: a clone's DmCloneConf is stored as sent
 	// and forwarded to the cn agent untouched, so a zero there leaves the

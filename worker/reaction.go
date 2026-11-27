@@ -2324,14 +2324,14 @@ func (w *spWorker) tryFailover(ctx context.Context, p *spPass) bool {
 		}
 		// AR5's first refusal: a report whose every ERROR row is of HL2's
 		// shared-state class — the stack of a created td whose thin id the
-		// pool no longer holds, or a pool whose metadata carries needs_check
-		// with the thin rows over it — is no trigger. The pool lives on the
-		// legs, so the
+		// pool no longer holds, or a pool whose metadata the primary's
+		// thin_check found damaged with the thin rows over it — is no
+		// trigger. The pool lives on the legs, so the
 		// next primary reads the same rows: a failover moves the host paths
 		// and nothing else, and the promoted cntlr, never settling, lost the
 		// role again at cntlr_unhealthy — to the peer its promotion had made
 		// clean — once per window, for as long as the td stayed lost or the
-		// pool kept its needs_check. The
+		// metadata stayed damaged. The
 		// err_epoch stays set, and every pass says why AR5 moves nothing, as
 		// AR8 does for what only an operator can repair, and goes on (AR2) —
 		// to AR7, which declines to replace a primary with no candidate on
@@ -3129,8 +3129,8 @@ func (w *spWorker) replaceTarget(
 		// ERROR row is of HL2's shared-state class is not replaced. The
 		// replacement would read the same rows from the same pool. The
 		// report carries the lost-id reason only while it is a converge's
-		// observation (dnv-worker.md, Known limits), and needs_check's on
-		// both channels.
+		// observation (dnv-worker.md, Known limits), and the damaged
+		// metadata's on both channels.
 		//
 		// The second is AR5's second, for a replacement
 		// (errorFollowedReplacement): a background read's observation of the

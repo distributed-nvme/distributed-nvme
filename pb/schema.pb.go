@@ -319,13 +319,13 @@ const (
 	// bitmap is read only while no namespace on it can take a write
 	// (architecture.md, Bitmap reads).
 	ResReason_RES_REASON_PARKED ResReason = 6
-	// A slice's thin pool whose metadata carries dm-thin's needs_check
-	// flag: the pool is read-only and stays so on every node that opens it,
-	// until an operator repairs its metadata. The cn agent sets it on both
-	// channels, on that RES_STATUS_ERROR slice_id_to_dm_pool row, its
-	// details the raw status line (cnagent.md CN13), and the worker's
-	// shared-state class reads it, so no failover or cntlr replacement
-	// follows it (dnv-worker.md HL2).
+	// A slice's thin pool, loaded, whose metadata carries dm-thin's
+	// needs_check flag: the pool is read-only on the node that loaded it.
+	// The cn agent sets it on both channels, on that RES_STATUS_ERROR
+	// slice_id_to_dm_pool row, its details the raw status line (cnagent.md
+	// CN13). It is the cntlr's own fault: a new primary checks the metadata
+	// before it loads the pool and clears the flag when the check passes,
+	// so a failover cures it (dnv-worker.md HL2).
 	ResReason_RES_REASON_POOL_NEEDS_CHECK ResReason = 7
 	// A slice's thin pool that dm-thin failed (its status line reads Fail),
 	// or whose status read could not read its metadata (Error). The cn agent
@@ -366,6 +366,16 @@ const (
 	// repair's bad leg only with force_undecided, the operator's judgement
 	// of which copy is stale (architecture.md, Repairs).
 	ResReason_RES_REASON_IDENTITY_UNDECIDED ResReason = 11
+	// A slice's thin pool that the primary does not load because thin_check
+	// refused its metadata, which carries dm-thin's needs_check flag, in
+	// three runs in a row: the metadata is damaged (cnagent.md CN13, The
+	// needs-check mark). The cn agent sets it on both channels, on that
+	// RES_STATUS_ERROR slice_id_to_dm_pool row, its details the last
+	// refusal. Every node
+	// meets the same metadata, so the worker's shared-state class reads it
+	// and no failover or cntlr replacement follows it (dnv-worker.md HL2);
+	// the case stays with the operator. Appended, never renumbered.
+	ResReason_RES_REASON_POOL_META_DAMAGED ResReason = 12
 )
 
 // Enum value maps for ResReason.
@@ -383,6 +393,7 @@ var (
 		9:  "RES_REASON_THIN_ID_NOT_ADOPTED",
 		10: "RES_REASON_OTHER_IDENTITY",
 		11: "RES_REASON_IDENTITY_UNDECIDED",
+		12: "RES_REASON_POOL_META_DAMAGED",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":                0,
@@ -397,6 +408,7 @@ var (
 		"RES_REASON_THIN_ID_NOT_ADOPTED": 9,
 		"RES_REASON_OTHER_IDENTITY":      10,
 		"RES_REASON_IDENTITY_UNDECIDED":  11,
+		"RES_REASON_POOL_META_DAMAGED":   12,
 	}
 )
 
@@ -22694,7 +22706,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\xe6\x02\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\x88\x03\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
@@ -22708,7 +22720,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x1eRES_REASON_THIN_ID_NOT_ADOPTED\x10\t\x12\x1d\n" +
 	"\x19RES_REASON_OTHER_IDENTITY\x10\n" +
 	"\x12!\n" +
-	"\x1dRES_REASON_IDENTITY_UNDECIDED\x10\v*O\n" +
+	"\x1dRES_REASON_IDENTITY_UNDECIDED\x10\v\x12 \n" +
+	"\x1cRES_REASON_POOL_META_DAMAGED\x10\f*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

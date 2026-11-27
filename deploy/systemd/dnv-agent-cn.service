@@ -43,18 +43,22 @@
 #
 # Stop: systemd sends SIGTERM to the agent's main process alone and kills
 # nothing else of the unit (KillMode=process); the agent then stops. It
-# cancels its background work and waits for none of it, and the
-# "nvme disconnect" its sweep runs in the background may go on after it
-# (dnagent.md SH27): inside the kernel's delete of a controller whose target
-# is gone, it waits out nvme_core's admin timeout, which no signal ends.
+# cancels its background work and waits only for its checks of thin-pool
+# metadata, whose thin_check holds a metadata device open (cnagent.md CN13),
+# and the "nvme disconnect" its sweep runs in the background may go on after
+# it (dnagent.md SH27): inside the kernel's delete of a controller whose
+# target is gone, it waits out nvme_core's admin timeout, which no signal
+# ends.
 # Under KillMode=mixed or control-group, systemd would wait for it before it
 # counts the stop as done, so a restart could leave the agent stopped that
 # long, longer than a controller node that holds a primary may stay stopped
 # (the operations doc's "A planned restart of an agent"). With this mode the
 # next start goes ahead beside it, and systemd logs it as a left-over
 # process; after a crash, the commands the old agent was running are left to
-# end in the same way. Send it no second signal: a second one ends the agent
-# at once, without its stop. Restart=on-failure starts again an agent that
+# end in the same way, a thin_check among them, which the next agent's check
+# of the same metadata meets as a busy device and waits out. Send it no
+# second signal: a second one ends the agent at once, without its stop.
+# Restart=on-failure starts again an agent that
 # exited with an error, such as one whose gRPC address this machine does not
 # hold yet, or one whose start check refused it, 5 seconds after it exited
 # (RestartSec=5s): a wait that keeps an agent which fails again and again

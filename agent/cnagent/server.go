@@ -101,6 +101,19 @@ type CnAgentServer struct {
 	// OsClient slot. It is a field so a test can read it.
 	connectSlots chan struct{}
 
+	// thinSlots are the places of the thin-pool metadata checks that run at
+	// once (startThinCheck), common.ThinCheckConcurrency of them, each run
+	// holding one while its thin_check runs. thinBg enrolls every run, under
+	// thinMu, and WaitBackground joins them once thinClosed, set under
+	// thinMu, keeps new runs from starting (dnagent.md SH27).
+	// thinCheckBackoff is how long a slice whose run did not pass waits
+	// before the next run; a field, so a test can shorten it.
+	thinSlots        chan struct{}
+	thinBg           sync.WaitGroup
+	thinMu           sync.Mutex
+	thinClosed       bool
+	thinCheckBackoff time.Duration
+
 	// rootCtx is the process lifetime ctx, captured by Prepare before the
 	// gRPC listener opens, or at Reconcile when nothing prepared the server
 	// (a test); the CN10 background disconnects and path watchers, the CN11
@@ -244,6 +257,16 @@ type cntlrState struct {
 	// (mdCheckDone). It is read and written under this cntlr's object lock
 	// or the node write lock, as forcedStarts is.
 	mdChecks map[uint64]mdCheckRun
+	// thinChecks holds, per slice id, the background check of the slice's
+	// thin-pool metadata this incarnation started because the metadata
+	// carries dm-thin's needs-check mark (CN13, The needs-check mark;
+	// thinCheckGate). In memory only: an agent restart forgets it, and the
+	// next converge that finds the mark starts the check again. A converge
+	// drops the entry once it finds the mark gone, and stops and drops the
+	// run of a slice whose pool it does not build (keepThinChecks). It is read
+	// and written under this cntlr's object lock or the node write lock, as
+	// tornTds is; each run's own fields under its mutex.
+	thinChecks map[uint64]*thinCheckRun
 	// reqFromRpc says whether req counts as delivered (CN8): a
 	// revision-gated SyncupCntlr of THIS incarnation stored it, whose save
 	// held, and no SyncupCntlr newer than it has been refused for a failed
@@ -358,12 +381,15 @@ func NewCnAgentServer(
 		disconnecting:   make(map[string]struct{}),
 		disconnectSlots: make(chan struct{}, disconnectConcurrency),
 		connectSlots:    make(chan struct{}, connectConcurrency),
-		rootCtx:         context.Background(),
-		probeInterval:   common.CnLegProbeInterval * time.Second,
-		fenceInterval:   common.CnFenceCheckInterval,
-		probeStall:      common.CnLegProbeStallSeconds * time.Second,
-		now:             time.Now,
-		sleep:           agent.SleepCtx,
+		thinSlots: make(chan struct{},
+			common.ThinCheckConcurrency),
+		thinCheckBackoff: common.ThinCheckRetrySeconds * time.Second,
+		rootCtx:          context.Background(),
+		probeInterval:    common.CnLegProbeInterval * time.Second,
+		fenceInterval:    common.CnFenceCheckInterval,
+		probeStall:       common.CnLegProbeStallSeconds * time.Second,
+		now:              time.Now,
+		sleep:            agent.SleepCtx,
 	}
 }
 
@@ -475,6 +501,7 @@ func newCntlrState(req *pb.SyncupCntlrRequest) *cntlrState {
 		tornTds:      make(map[uint64]bool),
 		forcedStarts: make(map[uint64]uint64),
 		mdChecks:     make(map[uint64]mdCheckRun),
+		thinChecks:   make(map[uint64]*thinCheckRun),
 		probers:      make(map[uint64]*legProber),
 		cutters:      make(map[uint64]*pathWatcher),
 		// No term and no file: in step until a save.

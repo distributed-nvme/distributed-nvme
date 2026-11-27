@@ -13,9 +13,10 @@ import (
 // data space and one read-only for full metadata (no needs_check) read
 // RES_STATUS_OK, the metadata auto-grow being the cure of the last
 // (dnv-worker.md AR6); one with needs_check reads RES_STATUS_ERROR with
-// RES_REASON_POOL_NEEDS_CHECK, which every primary that opens the pool
-// reads alike; and a pool dm-thin failed, or whose status read could not
-// read its metadata, reads RES_STATUS_ERROR with RES_REASON_POOL_FAILED.
+// RES_REASON_POOL_NEEDS_CHECK, which a new primary clears with thin_check
+// before it loads the pool (CN13, The needs-check mark); and a pool dm-thin
+// failed, or whose status read could not read its metadata, reads
+// RES_STATUS_ERROR with RES_REASON_POOL_FAILED.
 // The details stay the raw status line. No such row is named by the read's
 // verdict, since a converge cures none of them (CN30).
 func TestThePoolRowReadsThePoolsMode(t *testing.T) {

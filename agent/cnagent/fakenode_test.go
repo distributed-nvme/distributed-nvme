@@ -146,6 +146,12 @@ type fakeNode struct {
 	nextMdMinor int
 	// superblocks is the set of member devices carrying md metadata.
 	superblocks map[string]bool
+	// thinNeedsCheck holds the metadata devices, by path, that carry a
+	// thin-pool superblock, true while it carries dm-thin's needs-check
+	// mark; thinCheckFails the stderr thin_check answers, failing, for a
+	// metadata device it holds (CN13, The needs-check mark).
+	thinNeedsCheck map[string]bool
+	thinCheckFails map[string]string
 	// memberArray is the array identity each member's md superblock names
 	// (fakeArray.uuid): mdCreate writes it on the members it creates the
 	// array over, an --add on the member it adds, and an assembly takes it
@@ -568,44 +574,46 @@ type fakeCtrl struct {
 
 func newFakeNode() *fakeNode {
 	f := &fakeNode{
-		devSize:       make(map[string]uint64),
-		devNo:         make(map[string]string),
-		nextMinor:     1,
-		dms:           make(map[string]*fakeDm),
-		thinPools:     make(map[string]map[uint32]bool),
-		heldRoots:     make(map[string]bool),
-		thinMapped:    make(map[string]map[uint32]uint64),
-		thinMapLo:     make(map[string]map[uint32]uint64),
-		infoOmit:      make(map[string]bool),
-		tableOmit:     make(map[string]bool),
-		arrays:        make(map[string]*fakeArray),
-		superblocks:   make(map[string]bool),
-		memberArray:   make(map[string]string),
-		assembleDrop:  make(map[string]bool),
-		sbFacts:       make(map[string]fakeSuperblock),
-		bblRefused:    make(map[string]bool),
-		zeroNoEffect:  make(map[string]bool),
-		cloneHydrated: make(map[string]uint64),
-		dirs:          map[string]bool{common.DefaultLocalStorPrefix: true},
-		files:         make(map[string]string),
-		links:         make(map[string]string),
-		errFiles:      make(map[string]error),
-		protos:        make(map[string][]byte),
-		subsystems:    make(map[string]*fakeSubsys),
-		anaOf:         make(map[string]string),
-		nsIdxOf:       make(map[string]uint32),
-		connectFail:   make(map[string]int),
-		connectTakes:  make(map[string]time.Duration),
-		dialLost:      make(map[string]bool),
-		dialRefused:   make(map[string]int),
-		duringConnect: make(map[string]func()),
-		nsHeadAt:      make(map[string]headStages),
-		pendingHeads:  make(map[string]*pendingHead),
-		afterList:     make(map[string]func()),
-		afterRead:     make(map[string]func()),
-		thinDumps:     make(map[string]string),
-		failCmd:       make(map[string]string),
-		failCmdAlways: make(map[string]string),
+		devSize:        make(map[string]uint64),
+		devNo:          make(map[string]string),
+		nextMinor:      1,
+		dms:            make(map[string]*fakeDm),
+		thinPools:      make(map[string]map[uint32]bool),
+		heldRoots:      make(map[string]bool),
+		thinMapped:     make(map[string]map[uint32]uint64),
+		thinMapLo:      make(map[string]map[uint32]uint64),
+		infoOmit:       make(map[string]bool),
+		tableOmit:      make(map[string]bool),
+		arrays:         make(map[string]*fakeArray),
+		superblocks:    make(map[string]bool),
+		thinNeedsCheck: make(map[string]bool),
+		thinCheckFails: make(map[string]string),
+		memberArray:    make(map[string]string),
+		assembleDrop:   make(map[string]bool),
+		sbFacts:        make(map[string]fakeSuperblock),
+		bblRefused:     make(map[string]bool),
+		zeroNoEffect:   make(map[string]bool),
+		cloneHydrated:  make(map[string]uint64),
+		dirs:           map[string]bool{common.DefaultLocalStorPrefix: true},
+		files:          make(map[string]string),
+		links:          make(map[string]string),
+		errFiles:       make(map[string]error),
+		protos:         make(map[string][]byte),
+		subsystems:     make(map[string]*fakeSubsys),
+		anaOf:          make(map[string]string),
+		nsIdxOf:        make(map[string]uint32),
+		connectFail:    make(map[string]int),
+		connectTakes:   make(map[string]time.Duration),
+		dialLost:       make(map[string]bool),
+		dialRefused:    make(map[string]int),
+		duringConnect:  make(map[string]func()),
+		nsHeadAt:       make(map[string]headStages),
+		pendingHeads:   make(map[string]*pendingHead),
+		afterList:      make(map[string]func()),
+		afterRead:      make(map[string]func()),
+		thinDumps:      make(map[string]string),
+		failCmd:        make(map[string]string),
+		failCmdAlways:  make(map[string]string),
 
 		killCmd:               make(map[string]bool),
 		killCmdAlways:         make(map[string]bool),
@@ -1591,10 +1599,34 @@ func (f *fakeNode) dispatch(
 		return f.cmdStat(args)
 	case "thin_dump":
 		return f.cmdThinDump(args)
+	case "thin_check":
+		return f.cmdThinCheck(args)
 	case "losetup":
 		return f.cmdLosetup(args)
 	}
 	return "", 127
+}
+
+// cmdThinCheck is thin_check over a meta concat (CN13, The needs-check
+// mark): it fails with the device's stderr in thinCheckFails, and
+// otherwise passes; with --clear-needs-check-flag it clears the device's
+// mark. A test holds a run, as a long check of large metadata, with the
+// command gate (f.gate on "thin_check").
+func (f *fakeNode) cmdThinCheck(args []string) (string, int) {
+	if len(args) == 0 {
+		return "", 2
+	}
+	path := args[len(args)-1]
+	if stderr, ok := f.thinCheckFails[path]; ok {
+		f.dispatchStderr = stderr
+		return "", 1
+	}
+	if contains(args, "--clear-needs-check-flag") {
+		if _, ok := f.thinNeedsCheck[path]; ok {
+			f.thinNeedsCheck[path] = false
+		}
+	}
+	return "", 0
 }
 
 // cmdLosetup is the two losetup calls of the agent's write cache loop device
@@ -3693,6 +3725,19 @@ func (f *fakeNode) readSuperblockArea(
 		return nil, fmt.Errorf("open %s: no such device", path)
 	}
 	switch offset {
+	case 0:
+		// The thin-pool metadata superblock of a meta concat (CN13, The
+		// needs-check mark): dm-thin's magic and, when the mark is set, its
+		// flag; zeros for a device that holds no thin superblock.
+		block := make([]byte, length)
+		if marked, ok := f.thinNeedsCheck[path]; ok {
+			le := binary.LittleEndian
+			le.PutUint64(block[thinSbMagicAt:], thinSbMagic)
+			if marked {
+				le.PutUint32(block[thinSbFlagsAt:], thinSbNeedsCheck)
+			}
+		}
+		return block, nil
 	case mdSbOffset:
 		if !f.superblocks[path] {
 			return make([]byte, length), nil

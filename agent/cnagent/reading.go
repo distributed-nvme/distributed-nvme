@@ -132,13 +132,15 @@ func (s *CnAgentServer) readCntlr(
 			slog.String("error", err.Error()))
 		return newCntlrInfo(), &agent.SweepResult{}
 	}
-	plan := newCntlrPlan(s.nf, req)
+	plan := newCntlrPlan(s.nf, req, thinChecking(st))
 	applyFence(plan, st)
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
 	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)
 	res := s.sweepCntlr(ctx, st, plan, false, info, putBack, noCtrl)
 	s.noteStandbySweep(ctx, st, plan, info, res, false)
+	// CN13, The needs-check mark: a check that may run again.
+	s.nameThinChecksDue(ctx, st, plan, res)
 	if termMismatch(st, plan) {
 		// CN35: the converge's term step would act on it.
 		err := termFailure(st, plan)

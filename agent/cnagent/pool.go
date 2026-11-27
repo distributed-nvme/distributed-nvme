@@ -79,8 +79,15 @@ func (s *CnAgentServer) ensureSlice(
 	}
 	if err := s.ensurePool(
 		ctx, st, plan, sp, metaChanged || dataChanged); err != nil {
-		info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
-			poolKey, sp.poolFinalName, err.Error())
+		var damaged *thinMetaDamaged
+		switch {
+		case errors.Is(err, errThinChecking), errors.As(err, &damaged):
+			// CN13, The needs-check mark: the check's own row.
+			info.SliceIdToDmPool[sp.sliceId] = thinCheckRow(st, sp)
+		default:
+			info.SliceIdToDmPool[sp.sliceId] = st.tracker.Err(
+				poolKey, sp.poolFinalName, err.Error())
+		}
 		return false
 	}
 	// CN28 (architecture.md, Live-state reporting): details is the raw
@@ -112,10 +119,11 @@ func (s *CnAgentServer) ensureSlice(
 //     read its metadata. The failure lives in the loaded pool alone, so it
 //     is the cntlr's own: a new primary opens the pool from its last commit.
 //   - a line with needs_check reads RES_STATUS_ERROR with
-//     RES_REASON_POOL_NEEDS_CHECK: the flag is in the pool's metadata, so
-//     the pool is read-only on every node that opens it until an operator
-//     repairs it, and the worker's shared-state class reads the reason
-//     (dnv-worker.md HL2).
+//     RES_REASON_POOL_NEEDS_CHECK: dm-thin keeps the loaded pool read-only
+//     and set the mark in the pool's metadata. The row is the cntlr's own
+//     (dnv-worker.md HL2): a new primary checks the metadata before it
+//     loads the pool and clears the mark when the check passes (CN13, The
+//     needs-check mark).
 //   - any other line reads RES_STATUS_OK: a pool that writes, one out of
 //     data space, and one read-only for want of metadata space, whose cure
 //     is the metadata auto-grow (dnv-worker.md AR6), which an error row
@@ -217,6 +225,11 @@ func (s *CnAgentServer) ensurePool(
 		return err
 	}
 	if dev == nil {
+		// CN13, The needs-check mark: the metadata is checked before the
+		// pool is loaded, while it carries dm-thin's mark.
+		if err := s.thinCheckGate(ctx, st, plan, sp); err != nil {
+			return err
+		}
 		if err := s.dm.Create(ctx, sp.poolFinalName, table); err != nil {
 			return err
 		}

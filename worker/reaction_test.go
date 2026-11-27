@@ -4301,21 +4301,23 @@ func okStackInfo() *pb.CntlrInfo {
 	return info
 }
 
-// TestReactionPoolNeedsCheckIsNotATrigger pins HL2's shared-state class for
-// a slice's pool whose metadata carries dm-thin's needs_check: its pool row
-// reads RES_STATUS_ERROR with RES_REASON_POOL_NEEDS_CHECK (cnagent.md
-// CN13), the flag is on the pool's metadata, so every cntlr that takes the
-// role opens the pool read-only alike, and neither AR5 nor AR7 moves the
-// role for it; the class also holds the thin rows of that slice and the
-// stack of a td whose thin row there fails. A failed pool
-// (RES_REASON_POOL_FAILED) is the cntlr's own: a new primary opens the pool
-// from its last commit, so it fails over; and so does the needs_check pool
+// TestReactionPoolMetaDamagedIsNotATrigger pins HL2's shared-state class for
+// a slice's pool whose metadata the primary's thin_check found damaged: its
+// pool row reads RES_STATUS_ERROR with RES_REASON_POOL_META_DAMAGED
+// (cnagent.md CN13, The needs-check mark), every cntlr that takes the role
+// meets the same metadata, and neither AR5 nor AR7 moves the role for it;
+// the class also holds the thin rows of that slice and the stack of a td
+// whose thin row there fails. A failed pool (RES_REASON_POOL_FAILED) is the
+// cntlr's own: a new primary opens the pool from its last commit, so it
+// fails over; so does a loaded pool with dm-thin's needs_check
+// (RES_REASON_POOL_NEEDS_CHECK), since a new primary checks the metadata and
+// clears the mark before it loads the pool; and so does the damaged pool
 // with an own row beside it.
-func TestReactionPoolNeedsCheckIsNotATrigger(t *testing.T) {
+func TestReactionPoolMetaDamagedIsNotATrigger(t *testing.T) {
 	checked := func() *pb.ResInfo {
-		row := resErr("pool", "0 1024 thin-pool 0 12/4096 5/62 - ro "+
-			"discard_passdown queue_if_no_space needs_check 1024")
-		row.Reason = pb.ResReason_RES_REASON_POOL_NEEDS_CHECK
+		row := resErr("pool", "the thin pool's metadata is damaged: "+
+			"thin_check: bad checksum in metadata index")
+		row.Reason = pb.ResReason_RES_REASON_POOL_META_DAMAGED
 		return row
 	}
 	for _, tc := range []struct {
@@ -4380,6 +4382,14 @@ func TestReactionPoolNeedsCheckIsNotATrigger(t *testing.T) {
 			row := resErr("pool", "0 1024 thin-pool Fail")
 			row.Reason = pb.ResReason_RES_REASON_POOL_FAILED
 			info.SliceIdToDmPool[reactSliceId] = row
+		}, true},
+		{"a loaded pool with needs_check", func(info *pb.CntlrInfo) {
+			row := resErr("pool", "0 1024 thin-pool 0 12/4096 5/62 - ro "+
+				"discard_passdown queue_if_no_space needs_check 1024")
+			row.Reason = pb.ResReason_RES_REASON_POOL_NEEDS_CHECK
+			info.SliceIdToDmPool[reactSliceId] = row
+			info.TdIdToThinInfo[reactOtherTd].SliceIdToDmThin[reactSliceId] =
+				resErr("thin2", "create_thin: read-only pool")
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -5867,7 +5867,9 @@ repair's bad leg with no health epoch (Repairs, A leg of another identity);
 `dnv-worker.md` HL2 reads; `RES_REASON_POOL_NEEDS_CHECK` and
 `RES_REASON_POOL_FAILED`, which `cnagent.md` CN13 sets on an `ERROR` pool
 row whose status line carries needs_check, or `Fail` or `Error` in place of
-its numbers, the first of which `dnv-worker.md` HL2 reads;
+its numbers; `RES_REASON_POOL_META_DAMAGED`, which `cnagent.md` CN13 sets on
+the `ERROR` pool row of a slice whose metadata its `thin_check` refused, and
+`dnv-worker.md` HL2 reads;
 `RES_REASON_AWAITING_CUTOVER`, which `dnagent.md` DN13 sets on a migration
 destination's two `PROVISIONING` migration rows and `dnv-worker.md` RW18
 reads; `RES_REASON_SP_LEVEL`, which `cnagent.md` CN19 sets on every
@@ -9703,37 +9705,34 @@ document and only pointed to here.
   (`dnagent.md` DN9) keeps the one long-running background writer out of
   that queue.
 * **No thin-metadata repair path is specified.** Pool metadata is redundant
-  at the block layer (meta groups can be `RedundMdRaid1`), but there is no
-  "thin_check"-on-activate or "thin_repair" flow for a pool whose dm-thin
-  metadata carries needs_check or is corrupt. A pool whose metadata
-  carries needs_check — dm-thin sets it after a failed metadata operation —
-  reads `RES_STATUS_ERROR` with `RES_REASON_POOL_NEEDS_CHECK` (`cnagent.md`
-  CN13), which no failover cures, since every node that opens the pool
-  reads the flag on its metadata (`dnv-worker.md` HL2). Metadata so
+  at the block layer (meta groups can be `RedundMdRaid1`), and a primary
+  runs "thin_check" before it loads a pool whose metadata carries dm-thin's
+  needs_check, which dm-thin sets after a failed metadata operation, and
+  clears the flag when the check passes (`cnagent.md` CN13, The
+  needs-check mark): a loaded pool that reads `RES_STATUS_ERROR` with
+  `RES_REASON_POOL_NEEDS_CHECK` comes back writable after a failover. There
+  is no "thin_repair" flow: metadata that "thin_check" refuses reads
+  `RES_REASON_POOL_META_DAMAGED` on every primary, which no failover cures
+  (`dnv-worker.md` HL2). Metadata so
   corrupt that dm-thin cannot open the pool fails the pool's build on every
   primary, a row of the cntlr's own with no reason, and corruption found while the pool runs,
   whose needs_check write fails, reads `RES_REASON_POOL_FAILED`; either way
   each primary that reads the corrupt metadata meets it again, and only `dnv-worker.md` AR5's and AR7's
   second refusals bound the failovers and replacements it costs. Each is an
-  operator-intervention event (the pool's level raised to stop its thin
-  pools, "thin_check", then "thin_repair" onto a new device copied back
-  over the metadata's device, or the flag cleared when the check passes,
-  by hand; the operator's steps, for metadata that "thin_check" passes in a
-  slice of one meta group, are `operations.md`, Repair a thin pool's
-  metadata). Tried in the lab on a pool of one meta group whose data group
-  broke under a commit (`cnagent_integtest.md`, Cases, thinrepair): at the
-  level that builds no thin pool the meta group's array holds the whole
-  metadata, its superblock carrying the flag; "thin_check" passed with the
-  flag set, as the metadata was intact; "thin_repair" onto a new device of
-  the array's size, its check and its copy back over the array, which
-  already left the superblock without the flag, then
-  "thin_check --clear-needs-check-flag", brought the pool back writable at
-  the level that builds it,
-  with the data its last commit held. A swap of the new device for the old
-  has no path, as the primary builds the pool over the meta group's array
-  by its name, so the copy back stands in for it. Corrupt metadata is not
-  tried, nor a pool of more than one meta group, which has no device that
-  holds its whole metadata at that level.
+  operator-intervention event with no steps written: `operations.md`,
+  Repair a thin pool's metadata, says to stop at damaged metadata, and its
+  steps, the pool's level stepped down to the one that builds no thin pool
+  and back, serve a pool with the flag whose primary does not move, the
+  primary's own check running at the step back. Tried in the lab on a pool
+  of one meta group whose data group broke under a commit
+  (`cnagent_integtest.md`, Cases, thinrepair): at the level that builds no
+  thin pool the meta group's array holds the whole metadata, its
+  superblock carrying the flag; with one byte of the superblock's unused
+  tail changed, the step back left the pool unloaded and its row
+  `RES_REASON_POOL_META_DAMAGED` after three refusals; with the superblock
+  put back, the step back checked the metadata, cleared the flag and
+  brought the pool back writable with the data its last commit held.
+  Metadata damaged past its superblock is not tried.
 * **The fabric is trusted.** dnv authenticates no user and no host beyond
   its NQN: gRPC is plaintext (`grpc.md`, Wiring), dnv's etcd client
   presents no client certificate and no username or password, so etcd must
@@ -9850,7 +9849,8 @@ document and only pointed to here.
   failed write to the leg, so the commit goes on; a `RedundNone` group passes
   it up, so the waiting commit fails, and dm-thin drops the block mappings made
   since the last commit and leaves the pool read-only with its needs_check flag
-  set, which only a repair by hand ends (No thin-metadata repair path is
+  set, which a failover ends, as the new primary checks the metadata and
+  clears the flag before it loads the pool (No thin-metadata repair path is
   specified, above), and the pool's row reads it (`cnagent.md` CN13). On such
   a group, with no live path to the destination, a finish fails the commit and
   a cancel ends the block with the pool intact. Meanwhile a node write queued
@@ -10221,7 +10221,9 @@ document and only pointed to here.
   writes leaves the slice's thin pool read-only with its needs_check flag
   set, as a `RedundNone` group's failed commit does (A pool commit in a
   migration gap waits for the gap to end, above), and a new primary's build
-  brings the array back but not a writable pool; when it is the meta group,
+  brings the array back and, once its check of the metadata has passed and
+  cleared the flag, a writable pool as of the last commit (`cnagent.md`
+  CN13, The needs-check mark); when it is the meta group,
   the flag cannot be written either, so a new primary's build brings the
   pool back writable as of its last commit, without the mappings made
   since. The loss need not last: an outage of every leg's path past the
@@ -10247,9 +10249,11 @@ document and only pointed to here.
   the pool read read-only with needs_check, and every block a write of
   which the host was told was done read back as written; and a failover
   onto a controller node none of whose leg paths the cut reached assembled
-  both arrays from both legs and brought the pool back read-only with
-  needs_check, which only a repair by hand ends (No thin-metadata repair
-  path is specified, above). The end-to-end suite measured the cut with
+  both arrays from both legs. That node checks the metadata before it loads
+  the pool, clears the flag once the check passes and loads the pool
+  writable (`cnagent.md` CN13, The needs-check mark), which the cn suite's
+  groupcut case asserts at an 8 s cut. The end-to-end suite measured the
+  cut with
   the worker running, every leg's path cut from the primary alone while the
   standby still reached them, under a host writing one 4 KiB block a
   second, with no flush, into blocks the pool had not mapped, each cut
@@ -10262,8 +10266,7 @@ document and only pointed to here.
   was sent, the primary's reads of the two blocks written before the cut
   failed, and the broken group's row brought the failover onto the standby
   on its own, whose build assembled the array from both legs 6 s after the
-  pool read needs_check and opened the pool read-only with the flag again.
-  Each length is of one run; in two runs that timed the cuts less closely
+  pool read needs_check. Each length is of one run; in two runs that timed the cuts less closely
   the 3 s cut failed no write either and the 8 s cut left the pool
   read-only with needs_check too.
   The meta group's whole loss is worked out from dm-thin's code.

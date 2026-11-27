@@ -1103,12 +1103,11 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 //     and a failover would only bring the next one to it. Only a converge's
 //     observation carries that reason, as for a lost id.
 //   - it is the pool row of a slice that reads RES_STATUS_ERROR with
-//     RES_REASON_POOL_NEEDS_CHECK (cnagent.md CN13), a thin row of that
-//     slice, or a row of the stack of a td whose thin row in that slice
-//     does not read RES_STATUS_OK: dm-thin keeps needs_check in the pool's
-//     metadata, so the pool is read-only on every node that opens it, and a
-//     thin volume it cannot make fails there alike. Both channels carry
-//     this reason.
+//     RES_REASON_POOL_META_DAMAGED (cnagent.md CN13, The needs-check mark),
+//     a thin row of that slice, or a row of the stack of a td whose thin
+//     row in that slice does not read RES_STATUS_OK: the primary's
+//     thin_check found the pool's metadata damaged, which every node meets
+//     alike, so no node loads the pool. Both channels carry this reason.
 //
 // A td's stack is its own rows — its thin rows, its raid0 and its dm-error
 // — and every row of an object that exists for it alone — the ns-dev and
@@ -1119,6 +1118,10 @@ func cntlrErrorRows(info *pb.CntlrInfo) []cntlrRowId {
 // operator does (architecture.md, Known limits). A pool that dm-thin failed
 // (RES_REASON_POOL_FAILED) is not of the class: the failure lives in the
 // loaded pool alone, and a new primary opens the pool from its last commit.
+// Nor is a loaded pool with dm-thin's needs_check
+// (RES_REASON_POOL_NEEDS_CHECK): a new primary checks the metadata before it
+// loads the pool and clears the mark when the check passes (cnagent.md
+// CN13, The needs-check mark), so a failover cures it.
 // Every other ERROR row is the cntlr's own.
 // It returns the class's causes when the info carries ERROR rows and every
 // one of them is of the shared-state class, and none when one is the
@@ -1145,7 +1148,7 @@ func sharedStateOf(info *pb.CntlrInfo, state *model.SpState) sharedState {
 	checked := make(map[uint64]bool)
 	for sliceId, res := range info.GetSliceIdToDmPool() {
 		if res.GetStatus() == pb.ResStatus_RES_STATUS_ERROR &&
-			res.GetReason() == pb.ResReason_RES_REASON_POOL_NEEDS_CHECK {
+			res.GetReason() == pb.ResReason_RES_REASON_POOL_META_DAMAGED {
 			checked[sliceId] = true
 		}
 	}
@@ -1177,8 +1180,8 @@ func sharedStateOf(info *pb.CntlrInfo, state *model.SpState) sharedState {
 
 // sharedState is what sharedStateOf finds: the created tds whose thin id a
 // pool lost and the tds whose thin id the agent does not adopt, and the
-// slices whose pool reads needs_check, when they account for every ERROR
-// row of a report.
+// slices whose pool's metadata reads damaged, when they account for every
+// ERROR row of a report.
 type sharedState struct {
 	tdIds    []uint64
 	sliceIds []uint64
@@ -1190,8 +1193,8 @@ func (s sharedState) holds() bool {
 }
 
 // attr is the cause a `reaction skipped` record names: the first slice
-// whose pool reads needs_check, else the first td whose thin id is lost or
-// not adopted.
+// whose pool's metadata reads damaged, else the first td whose thin id is
+// lost or not adopted.
 func (s sharedState) attr() slog.Attr {
 	if len(s.sliceIds) != 0 {
 		return slog.Uint64("slice_id", s.sliceIds[0])

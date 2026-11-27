@@ -2890,6 +2890,7 @@ func nameCntlrRow(row *pb.ResInfo, res *agent.SweepResult) {
 			row.GetReason() == pb.ResReason_RES_REASON_THIN_ID_NOT_ADOPTED ||
 			row.GetReason() == pb.ResReason_RES_REASON_POOL_NEEDS_CHECK ||
 			row.GetReason() == pb.ResReason_RES_REASON_POOL_FAILED ||
+			row.GetReason() == pb.ResReason_RES_REASON_POOL_META_DAMAGED ||
 			row.GetDetails() == detailsPortMissing ||
 			strings.HasPrefix(row.GetDetails(), detailsConcatNoShrink) {
 			return

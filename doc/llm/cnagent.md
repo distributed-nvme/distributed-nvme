@@ -3093,6 +3093,77 @@ unreadable, and what CN12's `--assume-clean` rests on. A pool out of data
 space queues writes and then fails them when its own timeout runs out
 (`architecture.md`, Known limits).
 
+**The needs-check mark.** dm-thin sets a mark in the metadata superblock
+when a commit fails, as when every leg of a data group is lost for a few
+seconds, and opens a pool whose metadata carries the mark read-only,
+wherever it is loaded. So before the primary creates a slice's pool device
+it reads the superblock at the start of the meta concat with direct IO
+(`readThinNeedsCheck`): a block whose magic is not dm-thin's, as a fresh
+pool's zeroed metadata, carries no mark, and with no mark the pool is
+created as usual. With the mark set it loads no pool and runs one
+`thin_check --clear-needs-check-flag` on the meta concat in the background
+(`thinCheckGate`, `startThinCheck`), which checks the whole metadata and
+clears the mark only when the check passes, under `ThinCheckTimeout`.
+The run is a background task of the agent's process (`dnagent.md`
+SH27): its context derives from the root context with a trace id of its
+own, the agent's stop cancels it and joins it (`WaitBackground`), and at
+most `ThinCheckConcurrency` runs hold a command place at once, so the
+checks of many slices take at most that many of the command places the agent's
+commands share.
+
+While a run goes on, the pool's row reads `RES_STATUS_PROVISIONING` with
+the details "checking the thin pool's metadata", on the converge and on
+the read. The converge that starts the run made its plan before it could
+read the mark, so it reads the slice's thin rows `RES_STATUS_MISSING` and
+each td's raid0 and ns-dev rows `RES_STATUS_ERROR`, as any pass whose pool
+step fails does; from the next pass on, the read included, the plan holds
+the slice as checking, every thin row of the slice reads
+`RES_STATUS_PROVISIONING`, and every td waits as for a deferred slice,
+since its raid0 spans every slice. The concats are built as usual. The
+verdict names none of these rows (CN30).
+
+A run that passes ends the slice's checking: the read finds the pool absent
+and names it (CN30), and the converge the worker's re-send brings finds
+the mark gone and loads the pool. A run that ends without a pass leaves
+the slice checking for `ThinCheckRetrySeconds`; then the read names
+the pool absent with the details "the check of its metadata may run again"
+(`nameThinChecksDue`), and the converge the re-send brings runs the check
+again. Once `thinCheckRefusals` runs in a row refused the metadata,
+`thin_check` having run and exited non-zero, the pool's row reads
+`RES_STATUS_ERROR` with `RES_REASON_POOL_META_DAMAGED`, its details the
+last refusal, on both channels, the slice's thin rows
+`RES_STATUS_PROVISIONING`, and the pool stays unloaded: every node meets
+the same metadata, so the worker's shared-state class reads the reason
+(`dnv-worker.md` HL2), the verdict does not name the row (CN30), and the
+case stays with the operator (`operations.md`, Repair a thin pool's
+metadata). A run that judged no metadata counts no refusal: one killed at
+its time limit or stopped, and one that ends naming a device another
+process holds open or an IO error of the device (`thinCheckCannotRead`),
+as when a `thin_check` an earlier agent process left running still holds
+the meta concat. A pass sets the count back to zero. While the metadata
+reads damaged, the read looks at the mark: once it reads gone, as when
+that earlier `thin_check` or an operator cleared it, the read names the
+pool absent with the details "the needs-check mark of its metadata is
+gone", and the converge the re-send brings finds no mark and loads the
+pool. Reason: a refusal can also come from a cause of the moment that
+`thin_check` does not name, which a later run does not meet, and the
+damaged reason stops every failover for the pool.
+
+The runs live in this incarnation's memory (`cntlrState.thinChecks`), as a
+disk node's zeroing does (`dnagent.md` DN9): an agent restart checks again
+from the next converge that finds the mark. A pass that builds no pool for
+a slice, as a demotion's, a level below the pools, a request that no longer
+lists the slice or a cntlr the agent drops, stops the slice's run, waits
+for it to end and forgets it (`keepThinChecks`), before the pass's sweep, so
+no `thin_check` holds the meta concat when the sweep tears it down. A
+pool that is already loaded is not read: a pool that a commit marks while
+it is loaded serves read-only on that node, its row reading
+`RES_REASON_POOL_NEEDS_CHECK` (below), until a failover or a level step
+takes the pool down and the next load checks it. Reason: LVM checks a thin
+pool's metadata at each activation the same way, a passed check proves the
+metadata whole up to its last commit, and `thin_check` can run for minutes
+on large metadata, far past an agent command's limit and a syncup's.
+
 The pool's row (`slice_id_to_dm_pool`) reads the status line's state, on the
 converge and on the read alike, its details the raw line (`poolHealth`); a
 status read that fails reads `RES_STATUS_ERROR` with its error. A line that carries `Fail` in place of its numbers — dm-thin
@@ -3102,10 +3173,10 @@ failure is a state of the loaded pool alone, and a new primary opens the
 pool from its last commit, so it is the cntlr's own fault (`dnv-worker.md`
 HL2). A line with needs_check reads `RES_STATUS_ERROR` with
 `RES_REASON_POOL_NEEDS_CHECK`: dm-thin keeps that flag in the pool's
-metadata and opens the pool read-only wherever it is opened, until an
-operator repairs the metadata (`architecture.md`, Known limits), so no
-failover cures it, and the worker's shared-state class reads the reason
-(`dnv-worker.md` HL2). Every other line reads `RES_STATUS_OK`: a pool that
+metadata and serves the loaded pool read-only, and a new primary checks
+the metadata before it loads the pool (The needs-check mark, above), so a
+failover cures it and the reason is the cntlr's own fault (`dnv-worker.md`
+HL2). Every other line reads `RES_STATUS_OK`: a pool that
 writes; one out of data space; and one whose mode reads `ro` with no
 needs_check, which is a pool out of metadata space, since the table never
 asks for read-only. dm-thin makes that pool writable again when a resume
@@ -6050,8 +6121,13 @@ The rows, each with its `res_name` and what its probe checks:
   `RES_REASON_POOL_NEEDS_CHECK` for one with needs_check, and
   `RES_STATUS_OK` otherwise, with `RES_REASON_DIFFERS` while its metadata
   total is short of its metadata device or it holds a metadata snapshot
-  that a converge releases; the details are the raw line in
-  every case. A serving pool keeps its row so even while a deferred group
+  that a converge releases; the details are the raw line in each of these
+  cases. A pool that the check of its metadata holds has no status line,
+  as it is not loaded: its row reads `RES_STATUS_PROVISIONING` with the
+  details "checking the thin pool's metadata" while the check runs or
+  waits to run again, and `RES_STATUS_ERROR` with
+  `RES_REASON_POOL_META_DAMAGED` once the metadata reads damaged, its
+  details the last refusal (CN13, The needs-check mark). A serving pool keeps its row so even while a deferred group
   waits to be grown in (CN13): `PROVISIONING` never marks the serving pool,
   because it would switch auto-grow off.
 * `slice_id_to_meta` and `slice_id_to_data`, named by the `CnPoolMetaName`
@@ -6473,15 +6549,23 @@ read, or that a lockdown the lockdown file shows keeps from being ended
 "pending". It names no row the level suppresses, no
 `RES_STATUS_PROVISIONING` row, no thin row a converge marks
 `RES_REASON_THIN_ID_LOST` or `RES_REASON_THIN_ID_NOT_ADOPTED` (CN14), no
-pool row that reads needs_check or failed (`RES_REASON_POOL_NEEDS_CHECK`,
-`RES_REASON_POOL_FAILED`, CN13), no subsystem whose link fails because the
+pool row that reads needs_check, failed or damaged metadata
+(`RES_REASON_POOL_NEEDS_CHECK`, `RES_REASON_POOL_FAILED`,
+`RES_REASON_POOL_META_DAMAGED`, CN13), no subsystem whose link fails because the
 node's port is not there ("the port is not there", which the CN's verdict
 names), no concat the agent refuses to shrink, and no row of a transfer
 whose origin the request no longer names: no converge of the cntlr cures
 those, save a new volume refused because its header read failed: a later
 converge reads the headers again and can then build it (CN14), and a read
 names that volume absent, so the worker's re-send runs the header read again
-every second round at most, not on every round. Nor does it name the rows of
+every second round at most, not on every round. A read also names, as
+"absent", the pool of a slice whose check of its metadata ended without a
+pass and may run again, its pause over, and that of a slice whose metadata
+reads damaged once its mark reads gone (`nameThinChecksDue`, CN13, The
+needs-check mark), a name only a read gives, as the run ends in the
+background and the mark goes outside any pass: the converge the re-send
+brings runs the check again, or loads the pool. Nor does
+it name the rows of
 a snapshot not yet created while a slice that is not deferred lacks its thin
 device, or the read of one does not answer (`snapsLackingADevice`): a
 converge then runs CN14's pre-pass, which suspends the origin to make the

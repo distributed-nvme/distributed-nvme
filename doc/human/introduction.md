@@ -650,9 +650,11 @@ cut began. A cut of
 60.5 s each broke the array: md failed its first member 9.6 to 10.2 s after
 the cut began, the first write failed 14.9 to 15.5 s after it, and every
 later write failed at once. The thin pool then read
-read-only, needing a check, on its primary and after a failover to a
-controller node none of whose paths to the legs the cut reached, and every
-block the host was told was written read back as written.
+read-only, needing a check, on its primary, and every block the host was
+told was written read back as written. A failover to a controller node
+none of whose paths to the legs the cut reached then checks the pool's
+records, clears the mark and brings the pool back writable; the cn agent
+suite showed that on 2026-11-27 with an 8-second cut and its failover.
 
 The loss of a controller node that holds many pools was measured on the lab
 VMs with the e2e suite's many-pools case: one-slice RAID1 pools with two
