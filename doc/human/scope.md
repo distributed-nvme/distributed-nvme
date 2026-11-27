@@ -1177,13 +1177,17 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   has run to its end with that leg clean; where every leg has one,
   nothing moves, and a region recorded on every leg is lost from the
   group's legs. A retired leg that left the group before can still hold
-  that region, but the worker deletes a retired leg seven days after it
-  left once the group misses no leg and has no health epoch, and a region
-  recorded on every leg does not stop that delete: the worker can delete
-  the last copy, and its log does not say that the legs carry bad blocks.
-  Keep such a leg with `dnvctl retired-leg keep --leg <leg id>` ([Retired
-  legs](operations.md#retired-legs)); the state of that delete is fix
-  decided, and it is read from dnv's code, not seen in the lab. Between
+  that region: the worker deletes no retired leg of a group while md
+  records a bad block on a leg of it, and a repair's finish that would give
+  a retired leg back waits while one is recorded on a leg the new leg
+  copies from. A leg with bad blocks beside a clean leg is moved by leg
+  repair, and the hold then ends; over a region every leg records as bad,
+  md drops the record only at a later write over it that works, so the
+  hold stays until you delete the retired leg, or keep it ([Retired
+  legs](operations.md#retired-legs)); a finish waits for the delete. When
+  the worker keeps an old retired leg for this, its log names the hold,
+  with its own reason when every leg carries bad blocks. Shown by unit
+  tests, not seen in the lab. Between
   two
   checks the drops go on, each a resync of a small part of the leg. A
   drop stops a running check, and the next try starts again from the
@@ -2692,9 +2696,9 @@ failover's among them.
   - a retired leg, until the operator deletes it with
     `dnvctl retired-leg delete --leg <leg id>` ([Retired
     legs](operations.md#retired-legs)). The worker's own delete of a
-    retired leg after seven days needs the leg not kept, its group whole
-    and no health epoch on a leg or side of the group; a group whose new
-    side is dead carries one. `dnvctl retired-leg keep
+    retired leg after seven days needs the leg not kept, its group whole,
+    no health epoch on a leg or side of the group and no bad block on a
+    leg of it; a group whose new side is dead carries a health epoch. `dnvctl retired-leg keep
     --leg <leg id>` keeps a leg, and a forced-start mark keeps every
     retired leg of its group.
 

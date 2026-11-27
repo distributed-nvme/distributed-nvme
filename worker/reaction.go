@@ -317,6 +317,16 @@ const (
 	// reasonGrpLegUnhealthy is the retire timer's hold on a group a leg of
 	// whose leg_list, or that leg's side, has an err_epoch.
 	reasonGrpLegUnhealthy = "grp_leg_unhealthy"
+	// reasonGrpLegBadBlocks is the hold of the retire timer, and of the
+	// finish of a worker's repair that would give a retired leg back at
+	// the bound, on a group a leg of which the current primary's latest
+	// reading names md bad-block ranges on (legRanges): a region recorded
+	// on every leg is lost from the group's legs, and a retired leg may
+	// hold its only good copy. reasonGrpEveryLegBadBlocks is the same hold
+	// when every such leg carries ranges. md drops a range only at a later
+	// write that works, so an operator ends the hold (AR12).
+	reasonGrpLegBadBlocks      = "grp_leg_bad_blocks"
+	reasonGrpEveryLegBadBlocks = "grp_every_leg_bad_blocks"
 )
 
 // Non-normative records of the pass. The strings above (dnv-worker.md, Log
@@ -3993,9 +4003,12 @@ func grpAddrs(grp *pb.Group) []string {
 // holds only that repair's group: it is logged and the walk goes on, and
 // then the create. It reports whether the pass ends here.
 //
-// The finish needs no gate on the group's row: the primary reports started
-// only from a running array (cnagent.md CN28), and the finish loses nothing,
-// since the bad leg's data is kept as a retired leg.
+// The finish needs no gate on the group's row, short of one at the
+// retired-leg bound (finishHold): the primary reports started only from a
+// running array (cnagent.md CN28), and the finish loses nothing, since the
+// bad leg's data is kept as a retired leg; one at the bound gives a retired
+// leg back, so it waits for a current reading free of md bad-block ranges
+// on the legs the new leg copies from (AR12).
 func (w *spWorker) driveRepairs(ctx context.Context, p *spPass) bool {
 	for _, repName := range p.state.Conf.GetRepairNameList() {
 		if !common.HasRepNameReservedPrefix(repName) || p.moved[repName] {
@@ -4008,6 +4021,13 @@ func (w *spWorker) driveRepairs(ctx context.Context, p *spPass) bool {
 		ids := repairIds(repName, rep)
 		switch rep.GetRepStage() {
 		case pb.RepStage_REP_STAGE_STARTED:
+			if reason := finishHold(p, rep); reason != "" {
+				// AR12's hold on a give-back at the bound holds this
+				// repair alone; the walk goes on.
+				w.reactionSkipped(ctx, reactionRepairFinish, reason,
+					ids...)
+				continue
+			}
 			if w.finishRepair(ctx, p, repName, ids) {
 				return true
 			}
@@ -5085,8 +5105,11 @@ func (w *spWorker) retireOldLeg(ctx context.Context, p *spPass) {
 // or that report is of an observation older than the snapshot, since it
 // then describes the group from before a change to its legs (AR8's
 // gate, grpRowHold, grp_row_stale included); while that report does not set
-// the group's whole flag; and while a leg of the group's leg_list or its
-// side has an err_epoch.
+// the group's whole flag; while a leg of the group's leg_list or its side
+// has an err_epoch; and while that report's reading names md bad-block
+// ranges on a leg of the group's leg_list (rangesHold): a region md records
+// as bad on every leg is lost from the group's legs while the group still
+// reads whole, and the retired leg may hold its only good copy.
 func retireHold(p *spPass, retired *pb.RetiredLeg) string {
 	var grp *pb.Group
 	switch cloneName := retired.GetCloneName(); {
@@ -5125,7 +5148,75 @@ func retireHold(p *spPass, retired *pb.RetiredLeg) string {
 			}
 		}
 	}
-	return ""
+	legIds := make([]uint64, 0, len(grp.GetLegList()))
+	for _, leg := range grp.GetLegList() {
+		legIds = append(legIds, leg.GetLegId())
+	}
+	return rangesHold(p, grpId, legIds)
+}
+
+// rangesHold is "" when the current primary's latest reading of the group
+// grpId names md bad-block ranges on none of legIds (legRanges), and
+// otherwise the hold of AR12 on a retired leg's delete or give-back:
+// reasonGrpEveryLegBadBlocks when every one of them carries ranges, as
+// then a region recorded on every leg can be lost from the group's legs,
+// and reasonGrpLegBadBlocks when some do. The caller has read the group's
+// row through grpRowHold first, so the reading is current.
+func rangesHold(p *spPass, grpId uint64, legIds []uint64) string {
+	counts := p.info.GetGrpIdToGrpInfo()[grpId].GetLegIdToBadBlocks()
+	with := 0
+	for _, legId := range legIds {
+		if counts[legId] > 0 {
+			with++
+		}
+	}
+	switch {
+	case with == 0:
+		return ""
+	case with == len(legIds):
+		return reasonGrpEveryLegBadBlocks
+	}
+	return reasonGrpLegBadBlocks
+}
+
+// finishHold is the hold of the drive step's finish of a STARTED worker's
+// repair (AR8, AR12): "" when the finish may run, else the reason it waits.
+// Only a finish at the retired-leg bound is held, one whose group holds
+// common.MaxRetiredLegPerGrp retired legs, which gives the oldest one that
+// is not kept back (model.FinishRepair); the keep flags are not read here,
+// since an operator's clear of one raises no revision and the op reads the
+// flags afresh. Such a finish waits while the pass holds no current reading
+// of the group (grpRowHold) and while the reading names md bad-block ranges
+// on a leg_list leg that stays in the group, one other than the repair's
+// bad legs: md copies the new leg from those legs, so their ranges reach the
+// new leg too, a region bad on every leg that stays, whose only good copy
+// the leg given back may hold. Ranges on a new leg alone hold nothing, as
+// the legs it copied from still hold those regions; when every leg that
+// stays carries ranges the reason says so (rangesHold). A group the
+// snapshot does not hold is left to the op.
+func finishHold(p *spPass, rep *pb.Repair) string {
+	grp := repairGroup(p.state, rep)
+	if grp == nil ||
+		len(grp.GetRetiredLegIdList()) < common.MaxRetiredLegPerGrp {
+		return ""
+	}
+	if reason := grpRowHold(p, grp.GetGrpId()); reason != "" {
+		return reason
+	}
+	var sources, staying []uint64
+	for _, leg := range grp.GetLegList() {
+		if !slices.Contains(rep.GetBadLegIdList(), leg.GetLegId()) {
+			sources = append(sources, leg.GetLegId())
+		}
+	}
+	staying = append(staying, sources...)
+	for _, leg := range rep.GetNewLegList() {
+		staying = append(staying, leg.GetLegId())
+	}
+	if rangesHold(p, grp.GetGrpId(), sources) == "" {
+		return ""
+	}
+	return rangesHold(p, grp.GetGrpId(), staying)
 }
 
 // findSliceGroup is the group grpId of the slice sliceId in one snapshot,

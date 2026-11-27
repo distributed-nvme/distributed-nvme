@@ -3758,13 +3758,24 @@ was.
 
 What dnv does alone: the worker deletes one retired leg a pass once it is
 seven days old and not kept, only on a group whose array is whole, with no
-repair and no health epoch on a leg or a side, and only at levels where
-reactions run. So a group that does not come back whole keeps its retired
-legs until you delete them. A group holds at most two. At that bound the
-gateway refuses an operator's repair with a fresh leg, and the finish of
-the worker's repair gives back the oldest one that is not kept; with both
-kept, the worker's repair cannot finish until you clear a flag or delete
-one. The write of a forced-start mark sets the keep flag on the group's
+repair, no health epoch on a leg or a side and no bad block on a leg, and
+only at levels where reactions run. So a group that does not come back
+whole keeps its retired legs until you delete them. A group holds at most
+two. At that bound the gateway refuses an operator's repair with a fresh
+leg, and the finish of the worker's repair gives back the oldest one that
+is not kept; with both kept, the worker's repair cannot finish until you
+clear a flag or delete one. That finish also waits while md records a bad
+block on a leg the new leg copies from, and while the worker has no
+current report of the group. The worker also keeps every retired leg of a
+group while md records a bad block on a leg of it; for an old leg it logs
+`retired leg kept` on every pass, with the reason `grp_leg_bad_blocks`, or
+`grp_every_leg_bad_blocks` when every leg carries bad blocks, and for the
+finish `reaction skipped` with the same reasons. A leg with bad blocks
+beside a clean leg is moved by leg repair, and the hold ends. When every
+leg carries bad blocks over a region, a retired leg may hold its only good
+copy, and md drops the record only at a later write over it that works:
+keep that leg, or delete it once you know you do not need it. A held
+finish waits for a delete. The write of a forced-start mark sets the keep flag on the group's
 retired legs, and the finish of the repair of a leg of another identity
 keeps the old leg.
 

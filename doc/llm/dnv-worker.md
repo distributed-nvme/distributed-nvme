@@ -4794,12 +4794,14 @@ stage it left. For each other repair:
 
 * **STARTED**: the pass finishes it (`FinishRepair`, at `now`, with the
   cluster's stored conf), whatever its abort flag says. The finish needs no
-  gate on the group's row, since the primary reports *started* only from a
+  gate on the group's row, short of one at the retired-leg bound (AR12),
+  since the primary reports *started* only from a
   running array (`cnagent.md` CN28), and it loses nothing, since the bad
   leg's data is kept as a retired leg. When the group holds
   `MaxRetiredLegPerGrp` retired legs, the finish gives back the oldest that
   does not carry `keep` (`architecture.md`, Repairs), and its record names
-  the leg it gave back; when every one carries `keep`, the op refuses
+  the leg it gave back; such a finish first takes AR12's hold on a
+  current reading and on md's bad-block ranges, and waits under it; when every one carries `keep`, the op refuses
   (`retired legs kept`), which holds that repair alone as every refusal of
   this step does (below): the repair stays STARTED, and every pass logs the
   refusal, until an operator clears a flag or deletes a retired leg.
@@ -5192,13 +5194,12 @@ drains, the
 retire timer deletes a retired leg that has aged on a whole group: a retired
 leg is no leg, the timer is no reaction, and the data of the leg it deletes
 is held twice elsewhere, as far as the group's whole flag and health
-epochs tell, which do not see a region md records as bad on every leg
-(AR12; `scope.md` entry "A member md keeps dropping is put back until an
-md check reaches the bad sector; a slow leg reads ok"). The finish of the worker's own repair at the
+epochs tell, and while the primary's reading names no md bad-block range on
+a leg of the group (AR12). The finish of the worker's own repair at the
 retired-leg bound gives back the group's oldest retired leg that does not
 carry `keep` in its own transaction, a copy older than the newest one the
-group keeps beside the leg md holds in sync (AR8; `architecture.md`,
-Repairs); neither ever takes a kept leg; and its cancel gives
+group keeps beside the leg md holds in sync, under the same hold on ranges
+(AR8, AR12; `architecture.md`, Repairs); neither ever takes a kept leg; and its cancel gives
 back only its fresh new leg's side, which the array does not use, since the
 primary confirms an abort only once md holds nothing on that leg
 (`architecture.md`, Repair).
@@ -5297,11 +5298,37 @@ report reads anything but `OK`, or while that report is of an observation
 older than the snapshot's `SpRev` revision (the `grp_row_` reasons of AR8's
 gate on the group's row, `grp_row_stale` included); while that report does
 not set
-the group's whole flag (`grp_not_whole`); and while a leg of the group's
-`leg_list`, or that leg's side, has an `err_epoch` (`grp_leg_unhealthy`).
+the group's whole flag (`grp_not_whole`); while a leg of the group's
+`leg_list`, or that leg's side, has an `err_epoch` (`grp_leg_unhealthy`);
+and while that report's reading of the group names md bad-block ranges on
+a leg of its `leg_list` (`leg_id_to_bad_blocks`), `grp_every_leg_bad_blocks`
+when every such leg carries ranges and `grp_leg_bad_blocks` when some do.
+The same hold, with the same reasons, keeps the drive step's finish of a
+worker's repair at the retired-leg bound (AR8), which gives the group's
+oldest retired leg that is not kept back, whatever the keep flags read in
+the snapshot, since an operator's clear of one raises no revision: such a
+finish waits while the pass holds no current reading of the group (the
+`grp_row_` reasons) and while the reading names ranges on a `leg_list` leg
+other than the repair's bad leg, a leg the new leg copies from, whose
+ranges md copies onto the new leg; ranges on the new leg alone hold
+nothing, since the legs it copied from still hold those regions;
+`reaction skipped` logs the reason, `grp_every_leg_bad_blocks` when the
+new leg carries ranges too. A leg with ranges beside a clean leg is
+replaced by leg repair for its ranges (AR8, A leg with bad-block ranges),
+which ends the hold; over a region every leg records as bad, md drops a
+range only at a later write over it that works, so the operator ends the
+hold: the retire timer's by deleting the retired leg (`DeleteRetiredLeg`)
+once its copy is taken or known not needed, or by keeping it
+(`UpdateRetiredLegKeep`), and the finish's by deleting a retired leg, which
+brings the group under the bound; until then the held repair stays
+STARTED, the group's one repair.
 Reasons: the retired leg's data exists twice elsewhere only while the group
 is whole, so a group waiting for its legs, through a repair or until md
-makes its array whole, keeps its retired legs; a row turns `UNKNOWN` when
+makes its array whole, keeps its retired legs; a region md records as bad
+on every leg is lost from the group's legs while "whole" still holds, as md
+misses no leg, and a retired leg that left earlier may hold its only good
+copy, while a region recorded on one leg may be recorded on the other at
+the next read that fails there; a row turns `UNKNOWN` when
 the primary's stream dies, while a plain field such as the whole flag does
 not, so the row must read `OK`; the timer reads the row and the whole flag
 only from an observation at the snapshot's revision or later, since an

@@ -6643,16 +6643,14 @@ The four reactions:
 
 The worker never deletes user data on its own (`dnv-worker.md` AR9): the
 retire timer, a step of the pass and no reaction, deletes a retired leg
-only once its group misses no leg and has no health epoch, which it takes
-for the leg's data held twice elsewhere (`dnv-worker.md` AR12), and the
-finish of a worker's repair at the retired-leg bound gives back only a copy
-older than the newest one its group keeps (Repairs); a region md records
-as bad on every leg of the group, and the newer data of a leg a forced
-start left out whose keep a cancel dropped, are held nowhere else, and the
-timer does not look for either (`scope.md` entries "A member md keeps
-dropping is put back until an md check reaches the bad sector; a slow leg
-reads ok" and "After a forced start, a leg of the old identity can keep
-the group down");
+only once its group misses no leg, has no health epoch and carries no md
+bad-block range on a leg, which it takes for the leg's data held twice
+elsewhere (`dnv-worker.md` AR12), and the finish of a worker's repair at
+the retired-leg bound gives back only a copy older than the newest one its
+group keeps, under the same hold on ranges (Repairs); the newer data of a
+leg a forced start left out whose keep a cancel dropped is held nowhere
+else, and the timer does not look for it (`scope.md` entry "After a forced
+start, a leg of the old identity can keep the group down");
 neither takes a leg
 that carries `keep` (Retired legs).
 

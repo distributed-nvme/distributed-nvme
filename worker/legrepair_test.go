@@ -1173,6 +1173,103 @@ func TestLegRepairFinishLogsTheGiveBack(t *testing.T) {
 	}
 }
 
+// TestLegRepairFinishAtTheBoundWaitsOnBadBlocks pins the hold of the drive
+// step's finish at the retired-leg bound (AR8, AR12): the finish of a
+// worker's repair whose group holds common.MaxRetiredLegPerGrp retired legs
+// gives back the oldest one not kept, which may hold the only good copy of
+// a region md records as bad on the legs the new leg copies from, so it
+// waits, logged with the reason, while the primary's reading names ranges
+// on a leg_list leg other than the repair's bad leg (grp_every_leg_bad_blocks
+// when the new leg carries them too), and while the pass holds no current
+// reading of the group, a stale report included, whatever the keep flags
+// say; below the bound, with ranges on the new leg or the bad leg alone, or
+// with none, it runs.
+func TestLegRepairFinishAtTheBoundWaitsOnBadBlocks(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		bound  bool
+		ranges map[uint64]uint32
+		noRead bool
+		reason string
+		finish bool
+	}{
+		{"at the bound, the other leg with ranges", true,
+			map[uint64]uint32{reactDataLegB: 1}, false,
+			reasonGrpLegBadBlocks, false},
+		{"at the bound, ranges on the bad leg alone", true,
+			map[uint64]uint32{reactDataLegA: 1}, false, "", true},
+		{"at the bound, no ranges", true, nil, false, "", true},
+		{"at the bound, no current reading", true, nil, true,
+			reasonGrpRowError, false},
+		{"at the bound, every leg that stays with ranges", true,
+			map[uint64]uint32{reactDataLegB: 1, reactNewLeg: 1}, false,
+			reasonGrpEveryLegBadBlocks, false},
+		{"at the bound, ranges on the new leg alone", true,
+			map[uint64]uint32{reactNewLeg: 1}, false, "", true},
+		{"below the bound, the other leg with ranges", false,
+			map[uint64]uint32{reactDataLegB: 1}, false, "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newReactHarness(t, reactFixture(t))
+			withWorkerRepair(h, pb.RepStage_REP_STAGE_STARTED, false)
+			h.setGrpInfo(reactDataGrp, true, reactDataLegB)
+			h.w.cntlrs[reactCntlrA].driver.lastInfo.
+				GrpIdToGrpInfo[reactDataGrp].LegIdToBadBlocks = tc.ranges
+			if tc.bound {
+				for idx := range common.MaxRetiredLegPerGrp {
+					withReactRetired(h, h.dataGrp(),
+						retireLegA+uint64(idx)*10,
+						retireSideA+uint64(idx)*10, h.ago(100))
+				}
+			}
+			if tc.noRead {
+				h.setGrpRow(reactDataGrp, pb.ResStatus_RES_STATUS_ERROR)
+			}
+			h.pass()
+			if tc.finish {
+				h.wantOps("finish_repair")
+				return
+			}
+			h.wantOps()
+			h.wantSkipped(reactionRepairFinish, tc.reason)
+		})
+	}
+}
+
+// TestLegRepairFinishAtTheBoundReadsNoKeep pins two more cases of the hold
+// of the finish at the retired-leg bound: with every retired leg kept the
+// finish still waits on the other leg's ranges, since an operator's clear
+// of a flag raises no revision and the op would then give that leg back;
+// and a report older than the snapshot holds it with grp_row_stale.
+func TestLegRepairFinishAtTheBoundReadsNoKeep(t *testing.T) {
+	setup := func(t *testing.T) *reactHarness {
+		h := newReactHarness(t, reactFixture(t))
+		withWorkerRepair(h, pb.RepStage_REP_STAGE_STARTED, false)
+		h.setGrpInfo(reactDataGrp, true, reactDataLegB)
+		for idx := range common.MaxRetiredLegPerGrp {
+			withReactRetired(h, h.dataGrp(), retireLegA+uint64(idx)*10,
+				retireSideA+uint64(idx)*10, h.ago(100)).Keep = true
+		}
+		return h
+	}
+	t.Run("every retired leg kept", func(t *testing.T) {
+		h := setup(t)
+		h.w.cntlrs[reactCntlrA].driver.lastInfo.
+			GrpIdToGrpInfo[reactDataGrp].LegIdToBadBlocks =
+			map[uint64]uint32{reactDataLegB: 1}
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionRepairFinish, reasonGrpLegBadBlocks)
+	})
+	t.Run("a report older than the snapshot", func(t *testing.T) {
+		h := setup(t)
+		h.state.SpRevision = 1 << 40
+		h.pass()
+		h.wantOps()
+		h.wantSkipped(reactionRepairFinish, reasonGrpRowStale)
+	})
+}
+
 // TestLegRepairCancelsAnAbortedRepair pins the drive step's cancel: an
 // ABORTED worker's repair is cancelled under the stored conf, which gives
 // its fresh new leg's side back; the cancel is the pass's one action.

@@ -713,6 +713,19 @@ func TestRetireTimer(t *testing.T) {
 		{"the group is gone", func(h *reactHarness) {
 			h.state.RetiredLegs[retireLegA].GrpId = 7777
 		}, reasonGrpNotFound},
+		// md's bad-block ranges on a leg of the group: a region recorded
+		// on every leg is lost from the group's legs, and the retired leg
+		// may hold its only good copy (AR12).
+		{"a leg carries bad blocks", func(h *reactHarness) {
+			h.w.cntlrs[reactCntlrA].driver.lastInfo.
+				GrpIdToGrpInfo[reactDataGrp].LegIdToBadBlocks =
+				map[uint64]uint32{reactDataLegB: 2}
+		}, reasonGrpLegBadBlocks},
+		{"every leg carries bad blocks", func(h *reactHarness) {
+			h.w.cntlrs[reactCntlrA].driver.lastInfo.
+				GrpIdToGrpInfo[reactDataGrp].LegIdToBadBlocks =
+				map[uint64]uint32{reactDataLegA: 1, reactDataLegB: 2}
+		}, reasonGrpEveryLegBadBlocks},
 	}
 	for _, tc := range holds {
 		t.Run(tc.name, func(t *testing.T) {
