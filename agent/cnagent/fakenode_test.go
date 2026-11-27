@@ -351,6 +351,10 @@ type fakeNode struct {
 	failReadAlways map[string]bool
 	killRead       map[string]bool
 	killReadAlways map[string]bool
+	// failProtoRead holds local store paths whose next readProto fails once
+	// with an I/O error, the file left as it is: a read of the store disk
+	// that failed, not a file that does not decode (exact path match).
+	failProtoRead map[string]bool
 	// failWriteAlways is the WriteFileDirect counterpart of failCmdAlways,
 	// matched on a substring of "path=data": the write is recorded, refused
 	// with the given error text, and changes nothing — a configfs store
@@ -627,6 +631,7 @@ func newFakeNode() *fakeNode {
 		killCmdNoEffectAlways: make(map[string]bool),
 		failRead:              make(map[string]bool),
 		failReadAlways:        make(map[string]bool),
+		failProtoRead:         make(map[string]bool),
 		killRead:              make(map[string]bool),
 		killReadAlways:        make(map[string]bool),
 		failWriteAlways:       make(map[string]string),
@@ -1319,6 +1324,10 @@ func (f *fakeNode) readProto(
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.record("readproto %s", path)
+	if f.failProtoRead[path] {
+		delete(f.failProtoRead, path)
+		return fmt.Errorf("read %s: input/output error", path)
+	}
 	raw, ok := f.protos[path]
 	if !ok {
 		return fmt.Errorf("no such file: %s", path)

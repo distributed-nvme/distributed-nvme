@@ -68,6 +68,11 @@ type CnAgentServer struct {
 	mu     sync.Mutex
 	cns    map[string]*cnState
 	cntlrs map[string]*cntlrState
+	// cntlrFloors are, by cntlr key, the revisions of the cntlr files the
+	// startup pass decoded but skipped with their CN, whose cn file did not
+	// load (CN2): the floor of the revision gate of a cntlr the process does
+	// not hold, until a request of it is accepted (cntlrFloor; CN8).
+	cntlrFloors map[string]uint64
 	// marks are the converges in flight, by CN key and cntlr key, and the
 	// SyncupCn calls in flight that carry a request newer than the CN's held
 	// one, save one that only adds cntlrs (syncupCnAdds), or for a CN the
@@ -387,6 +392,7 @@ func NewCnAgentServer(
 		},
 		cns:             make(map[string]*cnState),
 		cntlrs:          make(map[string]*cntlrState),
+		cntlrFloors:     make(map[string]uint64),
 		fenceWatches:    make(map[string]*fenceWatch),
 		marks:           agent.NewConvergeMarks(),
 		roundReads:      true,
@@ -658,7 +664,7 @@ func (s *CnAgentServer) SyncupCntlr(
 	s.locks.Node().RLock()
 	defer s.locks.Node().RUnlock()
 	if s.getCntlr(key) == nil {
-		if reply := s.gateCntlr(ctx, req, 0); reply != nil {
+		if reply := s.gateCntlr(ctx, req, s.cntlrFloor(key)); reply != nil {
 			return reply, nil
 		}
 	}
@@ -666,6 +672,33 @@ func (s *CnAgentServer) SyncupCntlr(
 	objLock.Lock()
 	defer objLock.Unlock()
 	return s.syncupCntlr(ctx, key, req), nil
+}
+
+// cntlrFloor is the revision a request for the cntlr key must reach while
+// the process does not hold the cntlr: the revision of its cntlr file that
+// the startup pass decoded and skipped with its CN (cntlrFloors; CN2, CN8),
+// zero for any other.
+func (s *CnAgentServer) cntlrFloor(key string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cntlrFloors[key]
+}
+
+// setCntlrFloor raises the floor of the cntlr key to revision (CN2).
+func (s *CnAgentServer) setCntlrFloor(key string, revision uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if revision > s.cntlrFloors[key] {
+		s.cntlrFloors[key] = revision
+	}
+}
+
+// dropCntlrFloor ends the floor of the cntlr key once a request of it is
+// accepted, which the held request's revision gates from then on (CN8).
+func (s *CnAgentServer) dropCntlrFloor(key string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.cntlrFloors, key)
 }
 
 // PushCloneBitmap refuses a push for a cntlr this process does not hold under

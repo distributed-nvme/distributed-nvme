@@ -487,7 +487,8 @@ started, the CN and each of those cntlrs answer their Check rounds
 `SyncupCn` rewrites the file, and from there each skipped cntlr the list
 still names is where a lost `--local-store` leaves one — known by its
 pointer alone (CN21) — until its `SyncupCntlr`, which CN8 admits only
-after that `SyncupCn`, converges from the request it carries and rewrites
+after that `SyncupCn`, and only at the revision of its skipped file or
+above (CN8, the floor), converges from the request it carries and rewrites
 its file; that reply's `bm_info_list` acknowledges no chunk, so the
 worker pushes each chunk of its clones again (CN20). A skipped cntlr the
 re-sent list no longer names is in no list and not loaded, so the
@@ -667,9 +668,26 @@ CN8. Gating. The pointer must be present in the `cntlr_pointer_list` of the
 `SyncupCnRequest` this process holds for the CN (`dnagent.md` SH8) — else
 `ReplyCodeUnknownObject` (`SyncupCn` introduces pointers first;
 `architecture.md`, Common agent rules). Then the `dnagent.md` SH8 revision
-gate against the `SyncupCntlrRequest` this process holds — zero while it
-holds none, as for a cntlr whose file CN2's reload did not load or skipped,
-whatever revision that file carries. Then, last and still with zero side
+gate against the `SyncupCntlrRequest` this process holds. While it holds
+none, the gate reads the cntlr's floor: the revision of the cntlr's file
+that CN2's reload decoded and skipped with its CN, the highest one if
+several files name the cntlr. The floor ends once a request of the cntlr
+is accepted, whose revision gates from then on. The gate reads zero for a
+cntlr with no floor, as for one whose file did not load: a file that does
+not load names no cntlr and carries no revision. For a cntlr the process
+does not hold, a refusal of the revision gate or of the conf gate below
+carries the floor as its `revision`, as one for a held cntlr carries the
+held revision; a request the gates admit whose save fails keeps the floor
+and is refused at zero, the revision the process holds (`dnagent.md`
+SH5). Reason: two
+workers can drive one pool for a short time at a change of its owner
+(`dnv-worker.md` VW7), so an old owner can still send a request older than
+the skipped file, and with the gate at zero the agent took it; on a primary
+its converge removes what the request does not name, a volume made since
+with its thin id (CN14). The floor refuses no request that a start which
+loaded the file would take, save where two files name one cntlr, which
+only a file copied by hand under another name gives. Then, last and still
+with zero side
 effects, the conf gate of `architecture.md`, Common validation:
 `agent.ValidateBdevConf` (`dnagent.md`, Files) refuses a request whose
 `dm_pool_conf` carries a zero `data_block_size` or `low_water_mark_pct`,

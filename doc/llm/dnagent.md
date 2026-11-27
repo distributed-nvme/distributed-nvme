@@ -617,9 +617,11 @@ absent and deletes it.
 SH8. Per `architecture.md`, Common agent rules, with `stored` = revision of
 the last accepted request for the object, as this process holds it (zero
 when it holds none, as for an object whose file the startup reload did not
-load): `GateRevision` returns nil when that rule lets the request be
-applied, and a `ReplyCodeStaleRevision` rejection whose `details` name the
-incoming and the stored revision for a stale one.
+load), save on a cn for a cntlr whose file the reload decoded and skipped
+with its CN, whose revision is the cntlr's floor while the process holds
+no request of it (`cnagent.md` CN8): `GateRevision` returns nil when that
+rule lets the request be applied, and a `ReplyCodeStaleRevision` rejection
+whose `details` name the incoming and the stored revision for a stale one.
 
 SH9. Unknown-object rejections use `ReplyCodeUnknownObject` with a
 `details` string naming the missing pointer or id. A request whose conf

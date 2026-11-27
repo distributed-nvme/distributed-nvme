@@ -30,9 +30,15 @@ func (s *CnAgentServer) syncupCntlr(
 	req *pb.SyncupCntlrRequest,
 ) *pb.SyncupCntlrReply {
 	st := s.getCntlr(key)
-	var stored uint64
+	// held is the revision of the request the process holds, zero for a
+	// cntlr it does not hold. Such a cntlr is gated against its floor, the
+	// revision of its cntlr file the startup pass skipped with its CN, if
+	// any (CN2, CN8).
+	var held uint64
+	stored := s.cntlrFloor(key)
 	if st != nil {
-		stored = st.loadReq().GetRevision()
+		held = st.loadReq().GetRevision()
+		stored = held
 	}
 	if reply := s.gateCntlr(ctx, req, stored); reply != nil {
 		return reply
@@ -44,8 +50,8 @@ func (s *CnAgentServer) syncupCntlr(
 	// would converge the request before this one — whose td_list lacks a
 	// thin volume this pass may have created, and whose sweep would then
 	// delete that volume's thin id. A request whose save fails is refused at
-	// the revision the agent holds, zero for a cntlr it does not hold, for
-	// the same reason: it does not become the desired state, a cntlr the
+	// the revision the agent holds, zero for a cntlr it does not hold, its
+	// floor kept (CN8), for the same reason: it does not become the desired state, a cntlr the
 	// agent does not hold stays unknown, and no converge runs, so the cntlr
 	// file keeps the last request the agent accepted and a restart undoes
 	// nothing the node serves. Only when the directory fsync after the
@@ -84,12 +90,12 @@ func (s *CnAgentServer) syncupCntlr(
 		// agent does not hold has no state, and nothing changes. The object
 		// lock this call holds orders the write before every later converge
 		// and read of the cntlr (cntlrState.reqFromRpc).
-		if st != nil && req.GetRevision() > stored {
+		if st != nil && req.GetRevision() > held {
 			st.reqFromRpc = false
 		}
 		return &pb.SyncupCntlrReply{
 			AgentReply: agent.SaveFailedReply(err),
-			Revision:   stored,
+			Revision:   held,
 		}
 	}
 	saveAt := s.now()
@@ -110,6 +116,7 @@ func (s *CnAgentServer) syncupCntlr(
 	// lock.
 	st.reqFromRpc = true
 	s.putCntlr(key, st)
+	s.dropCntlrFloor(key)
 
 	info, sweep := s.convergeCntlr(ctx, st)
 	code := sweep.Reply()

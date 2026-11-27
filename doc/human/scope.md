@@ -925,18 +925,41 @@ The entries:
   Never put an agent's local files back from an older copy: delete them
   instead, as [the operations doc](operations.md#prepare-a-node) says.
   Read from dnv's code; not seen in the lab.
-- **An older request can pass a controller node's revision check after a
-  failed read of its local files.** Silent. A controller node's agent
-  refuses a request whose revision is lower than the one it holds. At its
-  start it loads its local files, and when the node's own file cannot be
-  read once, it skips every cntlr file too. It then holds no revision for
-  those cntlrs, and any request passes. Two workers can drive one pool for
+- **An older request can pass a controller node's revision check when the
+  agent's file of that cntlr cannot be read.** Silent. A controller node's
+  agent refuses a request whose revision is lower than the one it holds.
+  At its start it loads its local files. When a cntlr's own file cannot be
+  read once, or does not decode, the agent holds no revision for that
+  cntlr, and any request of it passes. Two workers can drive one pool for
   a short time at a change of its owner, so an old owner can still send an
   older request. On a primary the converge of that request removes what
   the request does not name: a volume made since is removed with its thin
-  id, and its data is gone. It needs an agent restart, one failed read and
-  an older request at once. State: fix decided. Read from dnv's code; not
-  seen in the lab.
+  id, and its data is gone. The same holds for the node's own file: a
+  request for the node older than that file passes, and when its list of
+  cntlrs lacks a pool made since, the agent removes that pool's devices on
+  the node. The pool then stops on that node until the newer request comes
+  back and the pool is built again, and a host may have to connect again;
+  no data is lost by it. A cntlr file that can be read while the node's
+  own file cannot keeps its revision, and an older request of that cntlr is
+  refused. Each case needs an agent restart, one failed read and an older
+  request at once. State: fix later; a file that does not decode gives no
+  revision to check against, and for a file whose read failed once the cure
+  is a second read, which is not built. Read from dnv's code; not seen in
+  the lab.
+- **An older request can pass a disk node's revision check after a failed
+  read of its local files.** Silent. A disk node's agent works as a
+  controller node's does: at its start, when the node's own file cannot be
+  read once, it skips every side file too, and then holds no revision for
+  those sides, so any request of a side passes, an older one too. Two
+  workers can drive one pool for a short time at a change of its owner, so
+  an old owner can still send an older request. That request can name an
+  older primary, the cntlr whose path the side serves, and the agent then
+  opens the side to that controller node again and closes it to the newer
+  primary, until the newer request comes back. The old primary's late
+  writes can land over the newer primary's data meanwhile. It needs an
+  agent restart, one failed read and an older request at once. State: fix
+  later; the fix of the controller node, which keeps the revision of each
+  skipped file, fits here too. Read from dnv's code; not seen in the lab.
 - **Making the old primary the primary again right after a failed fence
   lands its held writes late.** A fence that suspends the old primary's
   path and then fails to load the error target leaves that path suspended

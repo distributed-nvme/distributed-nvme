@@ -88,7 +88,8 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 	// read. Out of memory, the CN and each such cntlr answer their Check
 	// rounds with UnknownObject, so the worker re-sends the SyncupCn, which
 	// rewrites the file, and then each SyncupCntlr, which CN8 admits once
-	// that SyncupCn has put its pointer back.
+	// that SyncupCn has put its pointer back, and only at the revision of
+	// its skipped file or above (cntlrFloor).
 	unreadParent := func(clusterId, cnId uint64) bool {
 		return unreadCn && s.getCn(cnKey(clusterId, cnId)) == nil
 	}
@@ -104,15 +105,21 @@ func (s *CnAgentServer) Reconcile(ctx context.Context) error {
 			unreadCntlr = true
 			continue
 		}
+		ptr := req.GetCntlrPointer()
 		if unreadParent(req.GetClusterId(), req.GetCnId()) {
 			slog.WarnContext(ctx,
 				"skipping cntlr state file of an unloaded cn",
 				slog.String("path", path),
 				slog.Uint64("cluster_id", req.GetClusterId()),
 				slog.Uint64("cn_id", req.GetCnId()))
+			// Its revision stays as the floor of the cntlr's revision gate
+			// (CN8): a request older than the file is refused while the
+			// process holds no request of the cntlr, as the file holds a
+			// desired state newer than that request.
+			s.setCntlrFloor(cntlrKey(req.GetClusterId(), req.GetCnId(),
+				ptr.GetSpId(), ptr.GetCntlrId()), req.GetRevision())
 			continue
 		}
-		ptr := req.GetCntlrPointer()
 		s.putCntlr(cntlrKey(req.GetClusterId(), req.GetCnId(),
 			ptr.GetSpId(), ptr.GetCntlrId()), newCntlrState(req))
 	}
