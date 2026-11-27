@@ -147,13 +147,13 @@ func poolHealth(raw string, metaSectors uint64) (pb.ResStatus, pb.ResReason) {
 	return pb.ResStatus_RES_STATUS_OK, pb.ResReason_RES_REASON_NONE
 }
 
-// poolArgs is the dm thin-pool table's arguments: these four, and nothing
-// after them. With no feature arguments dm-thin writes every block it
-// provisions whole before a host can read any of it — a partial first write
-// zeroes the rest of the block — and that is what keeps the old bytes the
-// provisioning protocol leaves in a data group's data region from ever
-// reaching a host of this pool. So the table never asks dm-thin to skip block
-// zeroing ([D15]; cnagent.md CN13).
+// poolArgs is the dm thin-pool table's arguments: these four, and after
+// them only the discard feature of poolFeatures. With no other feature
+// argument dm-thin writes every block it provisions whole before a host can
+// read any of it — a partial first write zeroes the rest of the block — and
+// that is what keeps the old bytes the provisioning protocol leaves in a
+// data group's data region from ever reaching a host of this pool. So the
+// table never asks dm-thin to skip block zeroing ([D15]; cnagent.md CN13).
 //
 // A fresh pool also needs its metadata to read zero, and it does: a meta
 // group's sides are zeroed over the whole leg before their first export, and
@@ -182,6 +182,50 @@ func (s *CnAgentServer) poolArgs(
 		strconv.FormatUint(plan.blockSectors(), 10),
 		strconv.FormatUint(plan.lowWaterMark(sp.dataBlocks), 10),
 	}, nil
+}
+
+// poolFeatures is the dm thin-pool table's feature arguments after its four
+// (poolArgs): the one feature no_discard_passdown while a leg of the slice
+// has two sides, a migration's, and none otherwise. With it a host's
+// discard still frees the block in the pool and goes no further, so it never
+// reaches a leg, where a migration's new side would mark its region copied
+// with no copy (architecture.md, Migration; cnagent.md CN13).
+func poolFeatures(sp *slicePlan) []string {
+	if sp.keepsDiscards() {
+		return []string{"1", "no_discard_passdown"}
+	}
+	return nil
+}
+
+// poolTableKeepsDiscards says a live thin-pool table carries the feature
+// no_discard_passdown after its four arguments. dm-thin prints in its table
+// line exactly the features its load asked for, so the word is there only
+// when a load put it there (CN13).
+func poolTableKeepsDiscards(targets []common.DmTarget) bool {
+	if len(targets) != 1 || len(targets[0].Args) <= 4 {
+		return false
+	}
+	for _, arg := range targets[0].Args[4:] {
+		if arg == "no_discard_passdown" {
+			return true
+		}
+	}
+	return false
+}
+
+// poolTableMatches is CN13's compare of a live thin-pool table with the
+// wanted one: the four arguments, and whether it keeps a host's discards
+// from the legs, each read as poolArgs and poolFeatures write them. dm-thin
+// prints a feature count and its features after the four, so no other word
+// is compared.
+func poolTableMatches(
+	targets []common.DmTarget,
+	sp *slicePlan,
+	args []string,
+) bool {
+	return dmTableMatches(targets, "thin-pool", sp.dataSectors, args,
+		len(args)) &&
+		poolTableKeepsDiscards(targets) == sp.keepsDiscards()
 }
 
 // ensurePool converges one slice's thin-pool. concatGrew forces a reload even
@@ -219,7 +263,8 @@ func (s *CnAgentServer) ensurePool(
 	if err != nil {
 		return err
 	}
-	table := dmTable("thin-pool", sp.dataSectors, args)
+	table := dmTable("thin-pool", sp.dataSectors,
+		append(append([]string(nil), args...), poolFeatures(sp)...))
 	dev, err := s.dm.Info(ctx, sp.poolFinalName)
 	if err != nil {
 		return err
@@ -262,10 +307,24 @@ func (s *CnAgentServer) ensurePool(
 			slog.Uint64("meta_sectors", sp.metaSectors))
 		return s.dm.Reload(ctx, sp.poolFinalName, table)
 	}
-	// dm-thin appends status-derived feature arguments to its table output,
-	// so only the four arguments the agent writes are compared.
-	return s.ensureDmSingle(ctx, sp.poolFinalName, "thin-pool",
-		sp.dataSectors, args, len(args))
+	// ensureDmSingle's step, by CN13's compare: the four arguments the
+	// agent writes and the discard feature (poolTableMatches).
+	if sp.dataSectors == 0 {
+		return fmt.Errorf("device size is 0")
+	}
+	dev, err = s.dmInfo(ctx, nil, sp.poolFinalName)
+	if err != nil {
+		return err
+	}
+	if dev == nil {
+		return s.takeDmStep(ctx, sp.poolFinalName, dmStepCreate, table)
+	}
+	targets, err := s.dmTable(ctx, nil, sp.poolFinalName)
+	if err != nil {
+		return err
+	}
+	return s.takeDmStep(ctx, sp.poolFinalName, dmSingleStep(shapeOf(dev,
+		poolTableMatches(targets, sp, args), true)), table)
 }
 
 // releaseHeldSnap releases the metadata snapshot the pool holds when its
@@ -671,8 +730,7 @@ func (s *CnAgentServer) probePool(
 	if err != nil {
 		return pb.ResStatus_RES_STATUS_ERROR, err.Error(), none
 	}
-	if !dmTableMatches(
-		targets, "thin-pool", sp.dataSectors, args, len(args)) {
+	if !poolTableMatches(targets, sp, args) {
 		return pb.ResStatus_RES_STATUS_ERROR, "table is not the desired pool",
 			none
 	}

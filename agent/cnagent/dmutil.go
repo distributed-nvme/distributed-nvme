@@ -33,8 +33,11 @@ const argCmpAny = -1
 
 // dmTableMatches compares a live single-target table with a desired one.
 // argCmp bounds the comparison to the leading arguments a target reproduces
-// verbatim; dm-thin and dm-clone append status-derived arguments of their own,
-// so comparing all of them would report a converged device as drifted.
+// verbatim; dm-thin and dm-clone print a feature count and feature words of
+// their own after them, a count of zero for a load that gave none among
+// them, so comparing all of them would report a converged device as
+// drifted. A caller that compares a feature reads it on its own, as the
+// thin-pool's discard feature (poolTableMatches).
 func dmTableMatches(
 	targets []common.DmTarget,
 	targetType string,

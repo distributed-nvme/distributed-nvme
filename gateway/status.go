@@ -624,6 +624,32 @@ func stateSide(state *model.SpState, sideId uint64) (uint64, *pb.Side) {
 	return 0, nil
 }
 
+// stateLegSlice is the slice whose groups hold the leg legId, and whether
+// one does.
+func stateLegSlice(state *model.SpState, legId uint64) (uint64, bool) {
+	for _, sliceId := range state.Conf.GetSliceIdList() {
+		for _, grp := range allGroups(state.Slices[sliceId]) {
+			for _, leg := range grp.GetLegList() {
+				if leg.GetLegId() == legId {
+					return sliceId, true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
+// poolKeepsDiscards says a pool row reads RES_STATUS_OK with a status line
+// that keeps a host's discards from the legs, as the worker's cutover reads
+// it (dnv-worker.md RW18; cnagent.md CN13).
+func poolKeepsDiscards(row *pb.ResInfo) bool {
+	if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+		return false
+	}
+	st, ok := common.ParseThinPoolStatus(row.GetDetails())
+	return ok && st.KeepsDiscards()
+}
+
 // statusRoomKey names one disk node scan of a read: a group's extent count
 // and its leg count.
 type statusRoomKey struct {
@@ -1836,6 +1862,15 @@ func (b *statusBuilder) migrationRows(info *pb.CntlrInfo) {
 				row.Age = b.rowAge(path)
 				row.Text += ": the primary's path to the new side reads " +
 					rowText(path)
+			}
+			// dnv-worker.md RW18: the cutover also waits for the primary's
+			// pool of the leg's slice to keep a host's discards from the
+			// legs (cnagent.md CN13).
+			if sliceId, ok := stateLegSlice(state, legId); ok && info != nil &&
+				!poolKeepsDiscards(info.GetSliceIdToDmPool()[sliceId]) {
+				row.Text += fmt.Sprintf("; the primary's pool of slice %d "+
+					"does not keep a host's discards from the legs yet",
+					sliceId)
 			}
 			b.add(rankMigration, row)
 			continue

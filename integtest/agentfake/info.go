@@ -1,10 +1,12 @@
 package agentfake
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"time"
 
+	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/pb"
 )
 
@@ -362,6 +364,28 @@ func sliceIdList(req *pb.SyncupCntlrRequest) []uint64 {
 	return idList
 }
 
+// poolDetails is the details of a slice's pool row: while a leg of the
+// slice has two sides, a migration's, a thin-pool status line that keeps a
+// host's discards from the legs, with nothing used, as the cn agent's pool
+// then reads (cnagent.md CN13), which the worker's cutover waits for
+// (dnv-worker.md RW18); otherwise none.
+func poolDetails(req *pb.SyncupCntlrRequest, sliceId uint64) string {
+	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, sliceId)]
+	for _, grps := range [][]*pb.Group{
+		slice.GetMetaGrpList(), slice.GetDataGrpList(),
+	} {
+		for _, grp := range grps {
+			for _, leg := range grp.GetLegList() {
+				if len(leg.GetSideList()) > 1 {
+					return "0 1024 thin-pool 0 0/4096 0/1024 - rw " +
+						"no_discard_passdown queue_if_no_space - 1024"
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // cntlrInfoLocked derives CntlrInfo from the cntlr's last accepted request:
 // on a primary, one row per object it named — per slice, per group (meta and
 // data), per leg of every group, per td, per subsystem, per namespace, per
@@ -437,8 +461,10 @@ func (a *Agent) cntlrInfoLocked(key string) *pb.CntlrInfo {
 		if !primary {
 			continue
 		}
-		info.SliceIdToDmPool[sliceId] = a.resolveCntlrRow(
-			key, primary, rowKey("slice_id_to_dm_pool", sliceId))
+		info.SliceIdToDmPool[sliceId] = a.resolveDerivedRow(
+			key, primary, pb.ResStatus_RES_STATUS_OK,
+			poolDetails(req, sliceId), pb.ResReason_RES_REASON_NONE,
+			rowKey("slice_id_to_dm_pool", sliceId))
 		info.SliceIdToMeta[sliceId] = a.resolveCntlrRow(
 			key, primary, rowKey("slice_id_to_meta", sliceId))
 		info.SliceIdToData[sliceId] = a.resolveCntlrRow(

@@ -222,6 +222,37 @@ func TestNoDiscardWhereItCouldWait(t *testing.T) {
 	}
 }
 
+// TestNoDiscardWhileALegHasTwoSides: while a leg of a slice has two sides,
+// a migration's, the slice's pool passes no discard down to its data device
+// (CN13), so the delete sends its volume there no discard, which would free
+// the blocks in the pool alone, as the delete does anyway; the other
+// slice's volume is discarded, and both are deleted.
+func TestNoDiscardWhileALegHasTwoSides(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, tds: twoTds(),
+		twoSlices: true, extraSide: true})
+	for _, slice := range []uint64{testSlice, testSlice2} {
+		node.mapThinBlocks(poolNameOf(srv, slice), 1, 4)
+	}
+
+	node.Reset()
+	o := dropTestTd(3)
+	o.twoSlices, o.extraSide = true, true
+	syncupCntlrAt(t, srv, o)
+
+	if got := discardsOf(node, thinNameOf(srv, testTd, testSlice)); len(got) != 0 {
+		t.Fatalf("the volume of the slice whose leg has two sides was "+
+			"discarded: %v", got)
+	}
+	if got := discardsOf(node, thinNameOf(srv, testTd, testSlice2)); len(got) != 1 {
+		t.Fatalf("want one discard of the other slice's volume, got %v", got)
+	}
+	for _, slice := range []uint64{testSlice, testSlice2} {
+		assertVolumeGone(t, node, thinNameOf(srv, testTd, slice),
+			poolNameOf(srv, slice), 1)
+	}
+}
+
 // TestAFailedDiscardStopsNothing pins best effort: a discard the kernel
 // refuses is logged, and the volume is removed and its id deleted in the
 // same pass.

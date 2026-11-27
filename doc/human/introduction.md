@@ -251,7 +251,10 @@ provisioned both export the same subsystem, so the primary's kernel sees one
 namespace with two paths and nothing above the leg changes. The operator starts the migration; the new side
 is provisioned on the other disk node, and the primary connects to it. The
 worker starts the cutover only once the primary has a live path to the new
-side: the old side stops serving, and ANA moves the IO to the new side's
+side, and its thin pool keeps the hosts' discards: a discard, the message
+that a range holds no data any more, then frees the block in the pool and
+goes no further, so it never reaches either side. At the cutover the old
+side stops serving, and ANA moves the IO to the new side's
 dm-clone, the device-mapper target that copies a source device into a
 destination device while serving IO. The dm-clone pulls what is missing from
 the old side on demand and copies the rest in the background; its metadata

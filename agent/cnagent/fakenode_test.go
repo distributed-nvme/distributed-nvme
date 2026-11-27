@@ -3076,10 +3076,17 @@ func (f *fakeNode) dmStatus(name string) (string, int) {
 		if dm.poolNeedsCheck {
 			check, mode = "needs_check", "ro"
 		}
+		// The discard word is the live table's feature, as dm-thin prints
+		// it from the features its last load asked for (CN13).
+		discards := "discard_passdown"
+		if contains(fields, "no_discard_passdown") {
+			discards = "no_discard_passdown"
+		}
 		return fmt.Sprintf(
-			"0 %s thin-pool 0 12/%d 5/%s %s %s discard_passdown "+
+			"0 %s thin-pool 0 12/%d 5/%s %s %s %s "+
 				"queue_if_no_space %s 1024\n",
-			sectors, dm.poolMetaBlocks, fields[6], held, mode, check), 0
+			sectors, dm.poolMetaBlocks, fields[6], held, mode, discards,
+			check), 0
 	case "clone":
 		if dm.metaMode == common.CloneMetadataFail {
 			return fmt.Sprintf("0 %s clone Fail\n", sectors), 0

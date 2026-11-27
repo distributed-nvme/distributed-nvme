@@ -382,9 +382,9 @@ func TestGrowSliceReloadsThePool(t *testing.T) {
 // then keeps its default of writing a block it provisions whole before a host
 // can read any of it, which is what keeps the old bytes of a data group's
 // recycled extents from every host ([D15]; cnagent.md CN13). The converge
-// and the probe compare only the four leading arguments, since dm-thin
-// appends its features to the table it reports, so no other check would
-// notice a feature argument slipping in.
+// and the probe compare the four leading arguments and the discard feature
+// alone (TestPoolKeepsDiscardsWhileALegHasTwoSides), so no other check
+// would notice another feature argument slipping in.
 func TestPoolTableNeverSkipsBlockZeroing(t *testing.T) {
 	srv, node := newTestServer(t)
 	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
@@ -914,5 +914,150 @@ func TestAPoolStatusThatFailsReloadsNothing(t *testing.T) {
 	row := reply.GetCntlrInfo().GetSliceIdToDmPool()[testSlice]
 	if row.GetStatus() != pb.ResStatus_RES_STATUS_ERROR {
 		t.Fatalf("the pool row after a failed status read: %v", row)
+	}
+}
+
+// TestPoolKeepsDiscardsWhileALegHasTwoSides is CN13's discard rule: while a
+// leg of a slice has two sides, a migration's, the slice's pool is loaded
+// with the one feature no_discard_passdown, so a host's discard frees the
+// block in the pool and never reaches a leg, where a migration's new side
+// would mark its region copied (architecture.md, Migration). The converge
+// reloads a live pool whose table is against the rule, either way; the
+// other slice's pool keeps its four arguments; both channels report the
+// pool's live discard word in its row's status line; and the read reports
+// a pool whose table is against the rule as not the desired one.
+func TestPoolKeepsDiscardsWhileALegHasTwoSides(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, twoSlices: true})
+	wantPoolTable(t, srv, node)
+	pool, other := poolName(srv), poolNameOf(srv, testSlice2)
+
+	// The migration: slice 1's legs take a second side.
+	node.Reset()
+	reply, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 3, primary: true, twoSlices: true, extraSide: true}))
+	if err != nil {
+		t.Fatalf("syncup with two sides: %v", err)
+	}
+	assertOrder(t, node, "cmd dmsetup reload "+pool)
+	assertNoCall(t, node, "dmsetup reload "+other)
+	wantPoolDiscards(t, node, pool, true)
+	wantPoolDiscards(t, node, other, false)
+	wantPoolRowWord(t, reply.GetCntlrInfo(), testSlice, "no_discard_passdown")
+	wantPoolRowWord(t, reply.GetCntlrInfo(), testSlice2, "discard_passdown")
+	refreshTestCntlr(t, srv)
+	read := cntlrInfoNow(t, srv).GetCntlrInfo()
+	wantPoolRowWord(t, read, testSlice, "no_discard_passdown")
+	if row := read.GetSliceIdToDmPool()[testSlice]; row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_OK {
+		t.Fatalf("the read's pool row is %v, want OK", row)
+	}
+
+	// A re-converge changes nothing.
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 4, primary: true, twoSlices: true, extraSide: true})); err != nil {
+		t.Fatalf("re-converge: %v", err)
+	}
+	assertNoCall(t, node, "dmsetup reload "+pool)
+
+	// The read reports a live table that lost the word as not the pool
+	// it wants.
+	node.mu.Lock()
+	keep := node.dms[pool].table
+	node.dms[pool].table = strings.TrimSuffix(strings.TrimSpace(keep),
+		" 1 no_discard_passdown")
+	node.mu.Unlock()
+	refreshTestCntlr(t, srv)
+	if row := cntlrInfoNow(t, srv).GetCntlrInfo().
+		GetSliceIdToDmPool()[testSlice]; row.GetStatus() !=
+		pb.ResStatus_RES_STATUS_ERROR ||
+		!strings.Contains(row.GetDetails(), "not the desired pool") {
+		t.Fatalf("the read's row of a pool that lost the word is %v", row)
+	}
+	node.mu.Lock()
+	node.dms[pool].table = keep
+	node.mu.Unlock()
+
+	// The migration ends: one side again, and the pool passes discards
+	// down once more.
+	node.Reset()
+	reply, err = srv.SyncupCntlr(context.Background(), cntlrReq(reqOpts{
+		revision: 5, primary: true, twoSlices: true}))
+	if err != nil {
+		t.Fatalf("syncup with one side: %v", err)
+	}
+	assertOrder(t, node, "cmd dmsetup reload "+pool)
+	wantPoolTable(t, srv, node)
+	wantPoolRowWord(t, reply.GetCntlrInfo(), testSlice, "discard_passdown")
+}
+
+// TestAPoolCreatedWhileALegHasTwoSidesKeepsDiscards: a pool the converge
+// creates while a leg of its slice has two sides, as a new primary's after a
+// failover in the middle of a migration, is created with the feature, so no
+// discard reaches a leg between its create and a reload (CN13).
+func TestAPoolCreatedWhileALegHasTwoSidesKeepsDiscards(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true, extraSide: true})
+	pool := poolName(srv)
+	assertNoCall(t, node, "dmsetup reload "+pool)
+	wantPoolDiscards(t, node, pool, true)
+}
+
+// TestAMetaLegWithTwoSidesKeepsDiscards: the rule reads every group of the
+// slice, so a pool whose only leg with two sides is a meta group's takes
+// the feature too (CN13).
+func TestAMetaLegWithTwoSidesKeepsDiscards(t *testing.T) {
+	srv, node := newTestServer(t)
+	syncupBoth(t, srv, reqOpts{revision: 2, primary: true})
+	req := cntlrReq(reqOpts{revision: 3, primary: true})
+	slice := req.GetIdToSlice()[fmt.Sprintf(common.IdKeyFmt, testSlice)]
+	leg := slice.GetMetaGrpList()[0].GetLegList()[0]
+	leg.SideList = append(leg.SideList,
+		sideOf(testMetaSide+0x100, testIp2, testSvcId2))
+	node.Reset()
+	if _, err := srv.SyncupCntlr(context.Background(), req); err != nil {
+		t.Fatalf("syncup with a meta leg of two sides: %v", err)
+	}
+	wantPoolDiscards(t, node, poolName(srv), true)
+}
+
+// wantPoolDiscards checks that the live table of the thin-pool name carries
+// the one feature no_discard_passdown after its four arguments, or nothing
+// after them.
+func wantPoolDiscards(t *testing.T, node *fakeNode, name string, kept bool) {
+	t.Helper()
+	node.mu.Lock()
+	dm := node.dms[name]
+	node.mu.Unlock()
+	if dm == nil {
+		t.Fatalf("no thin-pool device %s", name)
+	}
+	fields := strings.Fields(dm.table)
+	if len(fields) < 7 {
+		t.Fatalf("pool table %q is short", dm.table)
+	}
+	got := strings.Join(fields[7:], " ")
+	want := ""
+	if kept {
+		want = "1 no_discard_passdown"
+	}
+	if got != want {
+		t.Fatalf("pool %s's features are %q, want %q", name, got, want)
+	}
+}
+
+// wantPoolRowWord checks the discard word of a pool row's status line.
+func wantPoolRowWord(t *testing.T, info *pb.CntlrInfo, sliceId uint64,
+	word string) {
+	t.Helper()
+	row := info.GetSliceIdToDmPool()[sliceId]
+	got := "unparsed"
+	if st, ok := common.ParseThinPoolStatus(row.GetDetails()); ok {
+		got = st.Discards
+	}
+	if got != word {
+		t.Fatalf("slice %#x's pool row %v reads discard word %q, want %q",
+			sliceId, row, got, word)
 	}
 }

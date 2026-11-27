@@ -3863,6 +3863,24 @@ dm_kind_names() { # <kind, e.g. c9 or d4>
 	return 0
 }
 
+# dm_discard_sect <dm name> prints the sectors the block layer counts in
+# discards on the dm device, the fourteenth field of its /sys/block stat, or
+# "unread" when that cannot be read.
+dm_discard_sect() { # <dm name>
+	local dmk out
+	dmk=$(readlink -f "/dev/mapper/$1" 2>/dev/null) || dmk=""
+	dmk=${dmk##*/}
+	out=""
+	if [ -n "$dmk" ]; then
+		out=$(awk '{print $14}' "/sys/block/$dmk/stat" 2>/dev/null) || out=""
+	fi
+	case "$out" in
+	'' | *[!0-9]*) echo unread ;;
+	*) echo "$out" ;;
+	esac
+	return 0
+}
+
 # resume_suspended releases every suspended dnv dm device before anything
 # reads one. Anything that touches a suspended device — `dmsetup remove`,
 # disabling the nvmet namespace above it, above all a block-device scan —
@@ -5092,6 +5110,23 @@ migr_clone_status() { # <sp hex16> <migr hex16>
 	out=$(timeout 10 dmsetup status --noflush "$names" 2>/dev/null) || out=""
 	echo "${out:-unread}"
 	return 0
+}
+
+# migr_clone_discards <sp hex16> <migr hex16> prints the discard sectors of
+# the migration's dm-clone on this guest (dm_discard_sect), or
+# "missing:<n>" when not exactly one device carries it, as
+# migr_clone_status finds it. The copy case reads it around a host's discard
+# while the migrating leg has two sides (cnagent.md CN13).
+migr_clone_discards() { # <sp hex16> <migr hex16>
+	local names n
+	names=$(dm_kind_names d3 |
+		awk -F- -v sp="$1" -v m="$2" '("" $5) == ("" sp) && ("" $6) == ("" m)')
+	n=$(printf '%s\n' "$names" | grep -c . || true)
+	if [ "$n" != 1 ]; then
+		echo "missing:$n"
+		return 0
+	fi
+	dm_discard_sect "$names"
 }
 
 # --- the react case's silencing rule (e2e_integtest.md, The cases, react) ---
@@ -6540,6 +6575,45 @@ diag() {
 	space
 	diag_kernel_reads "mdadm --detail --scan"
 	return 0
+}
+
+# thin_mapped <sp hex16> <td hex16> <slice hex16> prints the sectors the
+# td's thin volume in that slice maps, the first number of its status line
+# read live with --noflush, or "missing:<n>" / "unread" as thin_discards.
+thin_mapped() { # <sp hex16> <td hex16> <slice hex16>
+	local names n out
+	names=$(dm_kind_names c3 |
+		awk -F- -v sp="$1" -v td="$2" -v sl="$3" \
+			'("" $5) == ("" sp) && ("" $6) == ("" td) && ("" $7) == ("" sl)')
+	n=$(printf '%s\n' "$names" | grep -c . || true)
+	if [ "$n" != 1 ]; then
+		echo "missing:$n"
+		return 0
+	fi
+	out=$(timeout 10 dmsetup status --noflush "$names" 2>/dev/null |
+		awk '$3 == "thin" {print $4}') || out=""
+	case "$out" in
+	'' | *[!0-9]*) echo unread ;;
+	*) echo "$out" ;;
+	esac
+	return 0
+}
+
+# thin_discards <sp hex16> <td hex16> <slice hex16> prints the discard
+# sectors of the td's thin device in that slice on this guest
+# (CnThinDevName is dnv-<cluster>-<cn>-c3-<sp>-<td>-<slice>, so fields 5 to
+# 7 under -F-), or "missing:<n>" when not exactly one device carries it.
+thin_discards() { # <sp hex16> <td hex16> <slice hex16>
+	local names n
+	names=$(dm_kind_names c3 |
+		awk -F- -v sp="$1" -v td="$2" -v sl="$3" \
+			'("" $5) == ("" sp) && ("" $6) == ("" td) && ("" $7) == ("" sl)')
+	n=$(printf '%s\n' "$names" | grep -c . || true)
+	if [ "$n" != 1 ]; then
+		echo "missing:$n"
+		return 0
+	fi
+	dm_discard_sect "$names"
 }
 HELPER_CN_EOF
 }
@@ -9588,8 +9662,9 @@ HOST_MANY_TOOLS="fio readlink nohup pkill"
 # The copy case's stamps (stamp_write on host0, stamp_verify on both hosts,
 # as host1 reads the clone's stamp through the transfer): fio writes and
 # verifies them, cmp reads the clone's unwritten part as zeros, readlink
-# finds the device of a namespace's uuid link, and pkill is stamp_stop's.
-HOST_STAMP_TOOLS="fio cmp readlink pkill"
+# finds the device of a namespace's uuid link, and pkill is stamp_stop's;
+# blkdiscard is copy step 4's host discard (copy_migr_discard_kept).
+HOST_STAMP_TOOLS="fio cmp readlink pkill blkdiscard"
 # The stamped writer across a procedure (swrite_start) of the copy and react
 # cases, and react's fsync and group-cut writers (fsync_start) on host0: fio
 # writes and verifies the stamped writer's passes, python3 is the fsync and
@@ -20195,6 +20270,115 @@ copy_migr_discarded() { # <v> <k> <migr id>
 # out of room, not that the rule was waived. A run with the copy case always
 # has more DN VMs than legs (parse_args refuses such a run), so the location
 # assertion below is always made.
+
+# copy_pool_word <slice id> <word> holds once the primary's latest reading,
+# through `cntlr inspect`, shows the slice's pool row with the discard word
+# <word> in its status line, the pool's raw `dmsetup status` (cnagent.md
+# CN13, CN28). The word stands between blanks, so discard_passdown does not
+# match no_discard_passdown.
+copy_pool_word() { # <slice id> <word>
+	local det
+	ctl_try cntlr inspect --id "$PRIMARY_CNTLR_ID" || return 1
+	det=$(jq_of "$CTL_OUT" \
+		".cntlr_info.slice_id_to_dm_pool[\"$1\"].details // \"\"")
+	case " $det " in
+	*" $2 "*) return 0 ;;
+	esac
+	return 1
+}
+
+# copy_migr_discard_kept <dst v> <slice id> is copy step 4's proof that a
+# host's discard never reaches a migrating leg, so the new side's dm-clone
+# never marks a region copied for it (cnagent.md CN13; architecture.md,
+# Migration). While the leg has two sides the primary's pool of slice 0
+# must read no_discard_passdown. Host0 then saves, overwrites and discards
+# one data block of every slice of $TD0: SLICE_CNT pool blocks at the place
+# 3 x SLICE_CNT blocks in, which dm-striped hands every slice's thin device
+# as its whole block 3, so dm-thin frees each block whole; then it writes the
+# saved bytes back, so SHA0 still holds. The primary's thin device of slice
+# 0 must count at least one block of discard sectors and map at least one
+# block less, else the discard did not free a block in the pool, which is
+# the only case in which dm-thin passes one down, and the check proves
+# nothing; and the new side's dm-clone must count not one discard sector
+# more. dm-thin passes a
+# discard down before it ends the host's, and the dm-clone ends its own
+# before the disk node answers, so both counts are read once blkdiscard
+# returns.
+copy_migr_discard_kept() { # <dst v> <slice id>
+	local v=$1 slice=$2 dev blk skip saved before after tbefore tafter
+	local mbefore mafter
+	dev=$(host_dev "$UUID1")
+	blk=$(sp_field '.sp_conf.bdev_conf.dm_pool_conf.data_block_size')
+	case "$blk" in
+	'' | *[!0-9]* | 0) die "the pool's data_block_size reads '$blk'" ;;
+	esac
+	skip=$((3 * SLICE_CNT))
+	[ "$(((skip + SLICE_CNT) * blk))" -le "$TD0_SIZE" ] ||
+		die "$TD0 holds no fourth block of every slice: $TD0_SIZE bytes," \
+			"pool blocks of $blk bytes, $SLICE_CNT slice(s)"
+	wait_until "$WAIT_SHORT" \
+		"the primary's pool of slice 0 to keep a host's discards from its legs" \
+		copy_pool_word "$slice" no_discard_passdown
+	saved="$WORK/dk-saved"
+	copy_fc_dd "dd if=$dev of=$saved bs=$blk count=$SLICE_CNT skip=$skip status=none" ||
+		die "host0: saving $SLICE_CNT block(s) of $TD0 at block $skip failed"
+	copy_fc_dd "dd if=/dev/urandom of=$dev bs=$blk count=$SLICE_CNT seek=$skip conv=fsync status=none && sync" ||
+		die "host0: writing $SLICE_CNT block(s) of $TD0 at block $skip failed"
+	tbefore=$(helper_cn "$PRIMARY_CN" thin_discards "$(hex16 "$SP_ID")" \
+		"$(hex16 "$TD0_ID")" "$(hex16 "$slice")") ||
+		die "cn$PRIMARY_CN: the thin_discards verb could not be run"
+	mbefore=$(helper_cn "$PRIMARY_CN" thin_mapped "$(hex16 "$SP_ID")" \
+		"$(hex16 "$TD0_ID")" "$(hex16 "$slice")") ||
+		die "cn$PRIMARY_CN: the thin_mapped verb could not be run"
+	before=$(helper_dn "$v" migr_clone_discards "$(hex16 "$SP_ID")" \
+		"$(hex16 "$MIGR0_ID")") ||
+		die "dn$v: the migr_clone_discards verb could not be run"
+	case "$tbefore$before$mbefore" in
+	'' | *[!0-9]*)
+		die "the discard counts read '$tbefore' on the primary's thin device" \
+			"and '$before' on the new side's dm-clone, and the thin device" \
+			"maps '$mbefore' sectors"
+		;;
+	esac
+	copy_fc_dd "blkdiscard -o $((skip * blk)) -l $((SLICE_CNT * blk)) $dev" ||
+		die "host0: discarding $SLICE_CNT block(s) of $TD0 at block $skip failed"
+	tafter=$(helper_cn "$PRIMARY_CN" thin_discards "$(hex16 "$SP_ID")" \
+		"$(hex16 "$TD0_ID")" "$(hex16 "$slice")") ||
+		die "cn$PRIMARY_CN: the thin_discards verb could not be run"
+	mafter=$(helper_cn "$PRIMARY_CN" thin_mapped "$(hex16 "$SP_ID")" \
+		"$(hex16 "$TD0_ID")" "$(hex16 "$slice")") ||
+		die "cn$PRIMARY_CN: the thin_mapped verb could not be run"
+	after=$(helper_dn "$v" migr_clone_discards "$(hex16 "$SP_ID")" \
+		"$(hex16 "$MIGR0_ID")") ||
+		die "dn$v: the migr_clone_discards verb could not be run"
+	log "  a host's discard of block $skip of every slice of $TD0 while the" \
+		"leg has two sides: the primary's thin device of slice 0 counted" \
+		"$tbefore -> $tafter discard sectors and mapped $mbefore ->" \
+		"$mafter sectors, the new side's dm-clone $before -> $after"
+	case "$tafter$after$mafter" in
+	'' | *[!0-9]*)
+		die "the discard counts read '$tafter' on the primary's thin device" \
+			"and '$after' on the new side's dm-clone after the discard, and" \
+			"the thin device maps '$mafter' sectors"
+		;;
+	esac
+	[ "$((tafter - tbefore))" -ge "$((blk / 512))" ] ||
+		die "the primary's thin device of slice 0 counted $((tafter - tbefore))" \
+			"discard sectors, under one block's $((blk / 512)): the host's" \
+			"discard did not reach the pool, so the dm-clone's count proves nothing"
+	[ "$((mbefore - mafter))" -ge "$((blk / 512))" ] ||
+		die "the primary's thin device of slice 0 maps $((mbefore - mafter))" \
+			"sectors less after the discard, under one block's $((blk / 512)):" \
+			"the pool freed no block, so it would have passed nothing down" \
+			"and the dm-clone's count proves nothing"
+	assert_eq "$after" "$before" \
+		"the new side's dm-clone's discard sectors across a host's discard while the leg has two sides"
+	copy_fc_dd "dd if=$saved of=$dev bs=$blk count=$SLICE_CNT seek=$skip conv=fsync status=none && sync" ||
+		die "host0: writing the saved bytes back to $TD0 at block $skip failed"
+	copy_fc_dd "rm -f $saved" ||
+		die "host0: removing $saved failed"
+}
+
 # COPY_FC_TIMEOUT is the --timeout of copy step 4's forced cancel, whose
 # answer waits up to common.MigrCancelWaitSeconds for the primary to use the
 # old side alone (architecture.md, Migrations, The forced cancel).
@@ -20484,6 +20668,11 @@ copy_migration() {
 	fi
 	copy_migr_unthrottle "$srcv"
 
+	# A HOST'S DISCARD STOPS AT THE POOL while the leg has two sides, so the
+	# new side's dm-clone never marks a region copied for it
+	# (copy_migr_discard_kept).
+	copy_migr_discard_kept "$v" "$(sp_field '.sp_conf.slice_id_list[0]')"
+
 	# THE FORCED DROP (raid1 only), after the gap check, so its syncup lies
 	# outside the window that check reads, and before the finish, while the
 	# leg has two sides and its writes go through the new side's dm-clone
@@ -20515,6 +20704,13 @@ copy_migration() {
 	assert_field "$SP_JSON" '.sp_conf.migr_name_list | length' 0 \
 		"migr_name_list is empty again"
 	ctl_fail NOT_FOUND migr get --name "$MIGR0"
+	# With one side again the pool passes a host's discards down once more,
+	# which also shows that the lab's legs take discards, so the word the
+	# stage above read during the migration was the agent's doing
+	# (cnagent.md CN13).
+	wait_until "$WAIT_PROVISION" \
+		"the primary's pool of slice 0 to pass a host's discards down again" \
+		copy_pool_word "$(sp_field '.sp_conf.slice_id_list[0]')" discard_passdown
 
 	# THE LEG MUST BE SERVING AGAIN BEFORE ANY HOST IO TOUCHES IT. A migration
 	# SOURCE side is ANA-inaccessible once the cutover has started, and

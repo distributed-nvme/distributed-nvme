@@ -703,6 +703,10 @@ type pathReport struct {
 	// liveSides are the sides whose path row reads RES_STATUS_OK: the node
 	// holds a live controller to the side's address. Ascending.
 	liveSides []uint64
+	// keptDiscards are the slices whose pool row reads RES_STATUS_OK with
+	// a status line that keeps a host's discards from the legs
+	// (common.ThinPoolStatus.KeepsDiscards; cnagent.md CN13).
+	keptDiscards map[uint64]bool
 }
 
 // newPathReport reads one reply's own info; nil when there is none.
@@ -717,7 +721,25 @@ func newPathReport(revision uint64, info *pb.CntlrInfo) *pathReport {
 			rep.liveSides = append(rep.liveSides, sideId)
 		}
 	}
+	for sliceId, row := range info.GetSliceIdToDmPool() {
+		if row.GetStatus() != pb.ResStatus_RES_STATUS_OK {
+			continue
+		}
+		if st, ok := common.ParseThinPoolStatus(row.GetDetails()); ok &&
+			st.KeepsDiscards() {
+			if rep.keptDiscards == nil {
+				rep.keptDiscards = make(map[uint64]bool)
+			}
+			rep.keptDiscards[sliceId] = true
+		}
+	}
 	return rep
+}
+
+// keepsDiscards reports whether the report shows the pool of sliceId
+// keeping a host's discards from the legs.
+func (r *pathReport) keepsDiscards(sliceId uint64) bool {
+	return r.keptDiscards[sliceId]
 }
 
 // live reports whether the report shows a live path to sideId.
@@ -3624,7 +3646,11 @@ func (w *spWorker) applyRepairFlips(
 // plan the coordinator last decided makes the primary, and not disabled
 // (countsPaths), reported a live path to the dst side, in a reply at the
 // revision of the plan its own child drives (HL2), in the newest reply of
-// this drain that carried an info of its own (paths). Only the primary holds
+// this drain that carried an info of its own (paths); (4) that same reply
+// shows the pool row of the migration's slice RES_STATUS_OK with a status
+// line that keeps a host's discards from the legs (pathReport.keepsDiscards;
+// cnagent.md CN13), so no discard of a host reaches the dst side's dm-clone
+// once it serves. Only the primary holds
 // the arrays and the thin pools a cutover's gap can block, so a standby's
 // path counts for nothing, nor does a disabled primary's, as it runs the
 // standby shape (cnagent.md CN9), and after a failover the cutover waits for
@@ -3644,7 +3670,8 @@ func (w *spWorker) applyCutovers(
 	var kept []model.CutoverRef
 	for _, ref := range w.cutovers {
 		cntlrId, rep := livePathTo(paths, ref.DstSideId)
-		if rep == nil || !w.awaitsCutover(ref) {
+		if rep == nil || !rep.keepsDiscards(ref.SliceId) ||
+			!w.awaitsCutover(ref) {
 			kept = append(kept, ref)
 			continue
 		}

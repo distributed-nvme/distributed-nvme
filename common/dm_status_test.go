@@ -250,22 +250,39 @@ func TestParseThinPoolStatus(t *testing.T) {
 	}{
 		{"a bare line", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
 			"discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false,
+				"discard_passdown"}},
+		{"discards kept from the data device",
+			"0 1024 thin-pool 3 12/4096 5/62 - rw " +
+				"no_discard_passdown queue_if_no_space - 1024",
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false,
+				"no_discard_passdown"}},
+		{"discards ignored", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
+			"ignore_discard queue_if_no_space - 1024",
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false,
+				"ignore_discard"}},
+		{"an unknown discard word", "0 1024 thin-pool 3 12/4096 5/62 - rw " +
+			"passdown_maybe queue_if_no_space - 1024",
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false, ""}},
 		{"a held root", "0 1024 thin-pool 3 12/4096 5/62 123 rw " +
 			"discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, false, true, false, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, true, false, false,
+				"discard_passdown"}},
 		{"named, with needs_check", "pool: 0 1024 thin-pool 3 12/4096 5/62 " +
 			"- ro discard_passdown queue_if_no_space needs_check 1024",
-			&ThinPoolStatus{12, 4096, 5, 62, true, false, true, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, true, false, true, false,
+				"discard_passdown"}},
 		{"read-only without needs_check, a held root",
 			"0 1024 thin-pool 3 4096/4096 5/62 77 ro discard_passdown " +
 				"queue_if_no_space - 1024",
-			&ThinPoolStatus{4096, 4096, 5, 62, false, true, true, false}},
+			&ThinPoolStatus{4096, 4096, 5, 62, false, true, true, false,
+				"discard_passdown"}},
 		{"out of data space", "0 1024 thin-pool 3 12/4096 62/62 - " +
 			"out_of_data_space discard_passdown queue_if_no_space - 1024",
-			&ThinPoolStatus{12, 4096, 62, 62, false, false, false, true}},
+			&ThinPoolStatus{12, 4096, 62, 62, false, false, false, true,
+				"discard_passdown"}},
 		{"no mode word", "0 1024 thin-pool 3 12/4096 5/62",
-			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false}},
+			&ThinPoolStatus{12, 4096, 5, 62, false, false, false, false, ""}},
 		{"a failed pool", "0 1024 thin-pool Fail", nil},
 		{"a status read that failed", "0 1024 thin-pool Error", nil},
 		{"no pool", "0 1024 linear 8:0 0", nil},
@@ -358,6 +375,27 @@ func TestThinMetaBlocks(t *testing.T) {
 	} {
 		if got := ThinMetaBlocks(tc.sectors); got != tc.want {
 			t.Errorf("ThinMetaBlocks(%d) = %d, want %d", tc.sectors, got,
+				tc.want)
+		}
+	}
+}
+
+// TestThinPoolKeepsDiscards: a pool keeps a host's discards from its data
+// device only when its line says so (no_discard_passdown, ignore_discard);
+// a line that passes them down, or names no discard word, does not.
+func TestThinPoolKeepsDiscards(t *testing.T) {
+	for _, tc := range []struct {
+		word string
+		want bool
+	}{
+		{"no_discard_passdown", true},
+		{"ignore_discard", true},
+		{"discard_passdown", false},
+		{"", false},
+	} {
+		st := &ThinPoolStatus{Discards: tc.word}
+		if got := st.KeepsDiscards(); got != tc.want {
+			t.Fatalf("KeepsDiscards of %q = %v, want %v", tc.word, got,
 				tc.want)
 		}
 	}

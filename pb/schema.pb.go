@@ -5614,8 +5614,10 @@ type Migration struct {
 	// never renumbered.
 	MetaUnits uint64 `protobuf:"varint,6,opt,name=meta_units,json=metaUnits,proto3" json:"meta_units,omitempty"`
 	// Set by CreateMigration; cleared by the worker's cutover, once the
-	// primary reports a live path to the dst side and the dst side reports
-	// RES_REASON_AWAITING_CUTOVER (dnv-worker.md RW18), and never set again.
+	// primary reports a live path to the dst side and its thin pool of the
+	// leg's slice keeping the hosts' discards from the legs, and the dst
+	// side reports RES_REASON_AWAITING_CUTOVER (dnv-worker.md RW18), and
+	// never set again.
 	// While it is set the src side serves on, the dst side goes no further
 	// than its metadata wrapper and its exports on dm-error
 	// (architecture.md, Migration), and FinishMigration refuses, with force

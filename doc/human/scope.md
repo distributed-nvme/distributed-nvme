@@ -742,19 +742,6 @@ The entries:
 
 ### 5.3 Transfers, clones and migrations
 
-- **A host's discard can make a migration skip a block.** Silent. A
-  discard is a host's message that a range of a volume holds no data any
-  more, as `fstrim` sends. The thin pool passes a host's discard down to
-  the legs. On a leg past its cutover the discard reaches the device on the
-  new side that pulls the data from the old side, and that device marks the
-  region as copied, though it did not copy it. The thin pool records the
-  removal of the block up to a second later, at its commit. When the
-  primary dies in that second, the new primary's thin pool still maps the
-  block, and its reads go to the new side, which holds old bytes of a
-  reused extent there, possibly another pool's. State: fix decided. Until
-  then, stop the hosts' discards during a migration, as [the operations
-  doc](operations.md#move-a-leg-to-another-disk-node) says. Read from dnv's
-  code and the kernel's; not seen in the lab.
 - **A host's discard during a clone's copy can undo a later write.**
   Silent. While a clone copies its source, a host's discard of the clone's
   volume marks a region as copied, and a copy of that region may still be
@@ -3008,7 +2995,9 @@ design:
   a cloud disk or a file. The primary skips the discard while a leg of
   the slice has no live path, while a device mapper device of the slice
   is suspended, or while the thin pool is read-only, since the discard
-  could then wait for a long time or do nothing. It also sends at most a
+  could then wait for a long time or do nothing. It skips it too while a
+  migration moves a leg of the slice, as the thin pool then keeps every
+  discard from the legs. It also sends at most a
   fixed amount of discards in one converge, and leaves the rest. A volume
   whose part on each slice is not a whole number of thin pool blocks keeps
   the last, partial block of each part once it was written. A volume deleted while its pool moves to another

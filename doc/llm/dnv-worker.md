@@ -2850,8 +2850,16 @@ destination side's `side_id_to_path` row `RES_STATUS_OK` (`cnagent.md` CN28)
 in the drain of reports the coordinator is handling, read from a reply's own
 info: for a round, what its stream last carried; for a `SyncupCntlr` reply,
 the info that reply carried; and of one cntlr's replies that the drain
-folds, the last counts, live or not. It never reads the latest info a child
-holds, which can be another reply's, one from before a failover among them.
+folds, the last counts, live or not. That same reply must also show the
+`slice_id_to_dm_pool` row of the migration's slice `RES_STATUS_OK` with
+details, the pool's raw status line, whose discard word reads
+`no_discard_passdown` or `ignore_discard`
+(`common.ThinPoolStatus.KeepsDiscards`): the pool keeps the hosts'
+discards from the legs (`cnagent.md` CN13), so none reaches the
+destination's dm-clone once it serves. `model.StartCutover` does not check
+it again, as the store holds no report. The coordinator never reads the
+latest info a child holds, which can be another reply's, one from before a
+failover among them.
 A round of the destination side whose stream breaks or that misses, a
 round whose observation is too old included (HL7), marks the side's rows
 `RES_STATUS_UNKNOWN` (`architecture.md`, Live-state reporting), so the
@@ -7042,8 +7050,10 @@ provisioned and its cutover pending reports both migration rows waiting
 for the cutover, with the reason the cutover reads, and once the cutover
 is no longer pending reports its dm-clone row OK with a dm-clone status
 line, which BM7's read waits for; each cntlr reports a path row per side
-of a slice's leg that has two sides, live once that side is provisioned
-(RW18); a lever's row overrides them, its reason included. A cntlr
+of a slice's leg that has two sides, live once that side is provisioned,
+and a primary's pool row of such a slice carries a thin-pool status line
+that keeps a host's discards, with nothing used (RW18; `cnagent.md`
+CN13); a lever's row overrides them, its reason included. A cntlr
 answers `GetLegBm` with its `leg_bm_hex` lever's bytes for any leg, and
 with an empty bitmap without it (BM7). A cn fake answers `GetCnStore`,
 which the gateway suite's restore check reads, as the cn agent does

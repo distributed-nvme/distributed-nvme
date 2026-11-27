@@ -992,12 +992,33 @@ func TestStatusMigration(t *testing.T) {
 		// gateway's migr finish reads first and refuses without
 		// (checkSpToken), so the row names the key's wait.
 		noRev bool
+		// pool is the primary's pool row of the leg's slice, none when
+		// nil; absent is a fragment the row must not hold.
+		pool   *pb.ResInfo
+		absent string
 	}{
-		{"cutover pending", true, "", "cutover", false},
-		{"whole", false, whole, "it waits for migr finish", false},
+		{"cutover pending", true, "", "cutover", false, nil, ""},
+		{"cutover pending, no pool row", true, "",
+			"pool of slice 2 does not keep a host's discards", false, nil,
+			""},
+		{"cutover pending, a pool that passes discards down", true, "",
+			"does not keep a host's discards", false,
+			&pb.ResInfo{Status: pb.ResStatus_RES_STATUS_OK,
+				Details: "0 8 thin-pool 0 1/8 1/8 - rw discard_passdown " +
+					"queue_if_no_space - 8"}, ""},
+		{"cutover pending, a pool row in error that keeps discards", true,
+			"", "does not keep a host's discards", false,
+			&pb.ResInfo{Status: pb.ResStatus_RES_STATUS_ERROR,
+				Details: "0 8 thin-pool 0 1/8 1/8 - rw no_discard_passdown " +
+					"queue_if_no_space - 8"}, ""},
+		{"cutover pending, a pool that keeps discards", true, "", "cutover",
+			false, &pb.ResInfo{Status: pb.ResStatus_RES_STATUS_OK,
+				Details: "0 8 thin-pool 0 1/8 1/8 - rw no_discard_passdown " +
+					"queue_if_no_space - 8"}, "discards"},
+		{"whole", false, whole, "it waits for migr finish", false, nil, ""},
 		{"whole, no revision key", false, whole, "revision key is back",
-			true},
-		{"half", false, half, "", false},
+			true, nil, ""},
+		{"half", false, half, "", false, nil, ""},
 	} {
 		t.Run(tc.label, func(t *testing.T) {
 			env := newStEnv(t)
@@ -1020,11 +1041,15 @@ func TestStatusMigration(t *testing.T) {
 				CutoverPending: tc.pending,
 			}
 			pool.noRev = tc.noRev
-			cnFake.setInfo(nil, nil, nil, &pb.CntlrInfo{
+			info := &pb.CntlrInfo{
 				SideIdToPath: map[uint64]*pb.ResInfo{70: {
 					Status: pb.ResStatus_RES_STATUS_MISSING, Details: "no ctrl",
 				}},
-			})
+			}
+			if tc.pool != nil {
+				info.SliceIdToDmPool = map[uint64]*pb.ResInfo{stSlice: tc.pool}
+			}
+			cnFake.setInfo(nil, nil, nil, info)
 			env.put(pool)
 			rows := stRowsOf(env.status(0, ""), "p0")
 			if tc.fragment == "" {
@@ -1033,6 +1058,9 @@ func TestStatusMigration(t *testing.T) {
 			}
 			row := stOne(t, rows, pb.StatusKind_STATUS_KIND_MIGRATION,
 				tc.label, tc.fragment)
+			if tc.absent != "" && strings.Contains(row.GetText(), tc.absent) {
+				t.Errorf("row %q holds %q", row.GetText(), tc.absent)
+			}
 			if row.GetObjName() != "m1" || row.GetSideId() != 70 {
 				t.Errorf("row %v: want migration m1, new side 70", row)
 			}

@@ -859,7 +859,20 @@ the dm-clone's copied count, read on its disk node right after the apply,
 must leave regions to copy: a copy already whole when the pieces landed
 fails the case rather than passing, as no piece would then have kept a
 region from being copied, and a fault in the pieces would pass with it
-(`dnv-worker.md` BM7; `dnagent.md` DN15). The bucket then comes off. The
+(`dnv-worker.md` BM7; `dnagent.md` DN15). The bucket then comes off.
+While the leg has two sides the primary's pool of slice 0 must read
+`no_discard_passdown` in its row, and a host's discard must stop there
+(`cnagent.md` CN13; `architecture.md`, Migration, Host discards stop at
+the pool): host0 saves, overwrites and then discards one pool block of
+every slice of the volume, `SLICE_CNT` blocks at the place three times
+that far in, which dm-striped hands each slice's thin device as its whole
+block 3, and writes the saved bytes back after, so the volume's digest
+holds; the primary's thin device of slice 0 must count at least one block
+of discard sectors, else the discard never reached the pool and the check
+proves nothing, and the new side's dm-clone must count not one more. Once
+the migration has finished the pool must read `discard_passdown` again,
+which also shows that the lab's legs take discards, so the word during the
+migration is the agent's doing. The
 migration finishes under the same leg id with an optimized path before any
 read (`architecture.md`, Migration; `dnagent.md` DN12, DN13), and host0
 reads the migration's fio stamp back whole through the moved leg's new side:

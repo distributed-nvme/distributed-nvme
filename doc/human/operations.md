@@ -3441,8 +3441,13 @@ What dnv does alone:
   side as for any new side: its first blocks, or the whole side of a meta
   group. The worker then marks the side provisioned, and every
   cntlr connects to it. The old side serves meanwhile.
-- The worker starts the cutover once the new side waits for it and the
-  primary's path to it is live. It starts none while the pool's level is
+- While the leg has two sides, the primary's thin pool keeps the hosts'
+  discards: a discard, the message that a range holds no data any more,
+  as `fstrim` sends, frees the block in the pool and goes no further, so
+  it never reaches a leg. Discards need not be stopped for a migration.
+- The worker starts the cutover once the new side waits for it, the
+  primary's path to it is live and the primary's thin pool keeps the
+  hosts' discards. It starts none while the pool's level is
   `NO_MIGRATION` or below, or while the primary is disabled.
 - At the cutover the leg has no path for a moment: one to two and a half
   seconds were measured at 32 slices ([the scope page](scope.md),
@@ -3457,9 +3462,7 @@ What dnv does alone:
 
 Safe steps:
 
-1. First stop the hosts' discards on the pool's volumes, and make no file
-   system on them, for the whole migration, as "Steps that can lose data"
-   below says. Then start it:
+1. Start it:
    `dnvctl migr create --name <name> --src-side <side id>`. Add
    `--dn-black <addr>,<addr>` to keep the new side off those disk nodes,
    such as the slow one, or `--dn-white` to name the only ones it may use.
@@ -3469,7 +3472,9 @@ Safe steps:
 2. Wait for the cutover. `dnvctl migr get --name <name>` shows the new
    side as `migr.dst_side_id` and `migr.cutover_pending`, true until the
    cutover. `dnvctl cluster get-status` lists `its cutover is pending`
-   meanwhile, with the primary's path to the new side when it has one.
+   meanwhile, with the primary's path to the new side when it has one,
+   and says so while the primary's thin pool does not keep the hosts'
+   discards yet.
 3. Watch the copy: `dnvctl sp inspect-side --id <new side id>` shows
    dm-clone's status line in `side_info.migr_dst_info.dm_clone_info.details`.
    Its count of hydrated regions, the regions copied so far, out of all
@@ -3504,36 +3509,22 @@ Steps that can lose data:
   side's old bytes, possibly another pool's, which the reply's `loss` says.
   The reply comes once the primary uses the old side alone ([Ending a
   migration with force](#ending-a-migration-with-force)).
-- A host's discard, the message that a range holds no data any more, as
-  `fstrim` sends, on a leg past its cutover: it marks the region as copied
-  on the new side, and when the primary dies within the second before its
-  thin pool records the discard, the new primary reads that block from the
-  new side, which holds old bytes there, possibly another pool's ([the
-  scope page](scope.md#53-transfers-clones-and-migrations)). On each host
-  of the pool, stop discards for the whole migration: `sudo systemctl stop
-  fstrim.timer`, and take the `discard` option away from a file system
-  that has it. On ext4, `sudo mount -o remount,nodiscard <mount point>`
-  does it. XFS ignores that option on a remount: unmount the file system
-  and mount it again without `discard`. Either way, `findmnt -no OPTIONS
-  <mount point>` must then show no `discard`. Start them again once the
-  migration has ended. `blkdiscard` sends discards too, and
-  so does a file system's maker, such as `mkfs.ext4` or `mkfs.xfs`, unless
-  told not to; the Kubernetes driver's node plugin makes a file system on
-  a new volume this way.
 
 Use either flag only as [Ending a migration with force](#ending-a-migration-with-force)
 says.
 
 When to stop: the cutover does not come, and the `its cutover is pending`
-line names a path that does not read ok, or the new side's rows, which
+line names a path that does not read ok, or says that the primary's pool
+does not keep the hosts' discards, or the new side's rows, which
 `dnvctl sp inspect-side --id <new side id>` shows, wait for room in its
 metadata area: cancel it, which needs no force then, and ask for help.
 The copy's count stops growing, or its row reads an error: force no end,
 and read [Ending a migration with force](#ending-a-migration-with-force).
 
 Tested: the e2e suite's copy case, stage 04: a migration under a capped
-copy, the cutover, the worker's read of the written blocks, the finish and
-the data read back; then a second migration, whose plain cancel after the
+copy, the cutover, the worker's read of the written blocks, a host's
+discard after the cutover that the primary's thin pool keeps from the new
+side, the finish and the data read back; then a second migration, whose plain cancel after the
 cutover is refused and whose cancel with `--force` goes through, host0
 writing before it, after its cutover and right after its reply, each write
 read back once the leg is copied again ([Ending a migration with
@@ -4747,11 +4738,13 @@ Steps that can lose data:
   page](scope.md#53-transfers-clones-and-migrations)). On each host of the
   volume, stop discards before step 7 and until the clone has left:
   `sudo systemctl stop fstrim.timer`, and take the `discard` option away
-  from a file system that has it, as [Move a leg to another disk
-  node](#move-a-leg-to-another-disk-node) says for ext4 and XFS, and
-  check with `findmnt -no OPTIONS <mount point>`. Start them again after
-  step 14. A `blkdiscard` sends
-  discards too.
+  from a file system that has it. On ext4, `sudo mount -o
+  remount,nodiscard <mount point>` does it. XFS ignores that option on a
+  remount: unmount the file system and mount it again without `discard`.
+  Either way, `findmnt -no OPTIONS <mount point>` must then show no
+  `discard`. Start them again after step 14. A `blkdiscard` sends
+  discards too, and so does a file system's maker, such as `mkfs.ext4` or
+  `mkfs.xfs`, unless told not to.
 - A host NQN on the transfer's list that is not one of the destination's
   controller nodes: that host can write the origin while the clone copies
   it, and the clone then reads zeros where it wrote a block the list of

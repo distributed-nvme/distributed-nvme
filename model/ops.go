@@ -1632,7 +1632,8 @@ type CutoverRef struct {
 // StartCutover clears the migration's cutover_pending and bumps SpRev, in
 // one STM (MD6, RW18), and returns the SpRev revision that STM committed. The
 // sp worker calls it once the cntlr cntlrId, which its plan makes the
-// primary and not disabled, reported a live path to the dst side and the dst
+// primary and not disabled, reported a live path to the dst side and the
+// slice's thin pool keeping the hosts' discards from the legs, and the dst
 // side reported that it waits for the cutover; the bump hands the src side
 // dst_provisioned true and both sides the cleared flag, so the src side
 // starts the cutover (architecture.md, Migration).

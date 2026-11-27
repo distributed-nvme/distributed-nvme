@@ -226,6 +226,18 @@ type ThinPoolStatus struct {
 	// then fails. The gateway's status read lists such a pool, whatever its
 	// grow (architecture.md, Clusters, GetClusterStatus).
 	OutOfDataSpace bool
+	// Discards is the line's discard word, which dm-thin prints from the
+	// pool's live features: discard_passdown, no_discard_passdown or
+	// ignore_discard; empty when the line holds none of them in its place.
+	Discards string
+}
+
+// KeepsDiscards says the pool passes no discard down to its data device:
+// its discard word reads no_discard_passdown or ignore_discard. A line with
+// no discard word does not show it, so it reads false.
+func (st *ThinPoolStatus) KeepsDiscards() bool {
+	return st.Discards == "no_discard_passdown" ||
+		st.Discards == "ignore_discard"
 }
 
 // ThinPoolFault is the word a thin pool's `dmsetup status` line carries in
@@ -257,8 +269,8 @@ func ThinPoolFault(raw string) string {
 // Of what follows the two ratios — the held metadata root, the mode word
 // (rw, ro or out_of_data_space), the discard and no-space words,
 // needs_check, the low watermark — the held metadata root, which reads "-"
-// when none is held, the mode word, ro or out_of_data_space, and
-// needs_check are read: dm-thin prints ro both for a pool out of metadata
+// when none is held, the mode word, ro or out_of_data_space, the discard
+// word, and needs_check are read: dm-thin prints ro both for a pool out of metadata
 // space and for a read-only one, and only the second carries needs_check,
 // since dnv's table never asks for read-only. A line that carries `Fail` or
 // `Error` in place of its numbers (ThinPoolFault) does not parse.
@@ -294,6 +306,12 @@ func ParseThinPoolStatus(raw string) (*ThinPoolStatus, bool) {
 	if len(fields) > token+5 {
 		st.ReadOnly = fields[token+5] == "ro"
 		st.OutOfDataSpace = fields[token+5] == "out_of_data_space"
+	}
+	if len(fields) > token+6 {
+		switch word := fields[token+6]; word {
+		case "discard_passdown", "no_discard_passdown", "ignore_discard":
+			st.Discards = word
+		}
 	}
 	for _, field := range fields[token+4:] {
 		if field == "needs_check" {

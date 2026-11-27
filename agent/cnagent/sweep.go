@@ -1679,8 +1679,10 @@ func newThinDiscard(plan *cntlrPlan) *thinDiscard {
 // nothing. Such a block also keeps the volume's highest sector at its end, so
 // a re-send after a pass the budget cut starts again at the last whole block.
 //
-// It sends nothing where the discard could wait in the kernel, which it
-// would do under the cntlr's CN1 locks: when a leg of the slice's groups has
+// It sends nothing while a leg of the slice has two sides, as the pool then
+// passes no discard down to its data device (CN13), and nothing where the
+// discard could wait in the kernel, which it would do under the cntlr's CN1
+// locks: when a leg of the slice's groups has
 // a disconnect in flight, or its lookup in the pass's walk fails or finds no
 // live, optimized path (a discard into a dead leg waits out the leg fast IO
 // fail timeout), or when the volume, its pool or a dm device under the pool
@@ -1836,6 +1838,13 @@ func (s *CnAgentServer) readSliceDiscardWhy(
 	td *thinDiscard,
 	sp *slicePlan,
 ) string {
+	// CN13: while a leg of the slice has two sides the pool passes no
+	// discard down to its data device, so a discard would free the blocks
+	// in the pool alone, which the delete does anyway.
+	if sp.keepsDiscards() {
+		return "the pool keeps discards from its legs while a leg of the " +
+			"slice has two sides"
+	}
 	devs := []string{sp.poolFinalName, sp.poolMetaName, sp.poolDataName}
 	for _, gp := range slices.Concat(sp.metaGrps, sp.dataGrps) {
 		if !gp.raid1 && gp.dmName != "" {

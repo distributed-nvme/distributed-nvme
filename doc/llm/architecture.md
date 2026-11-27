@@ -863,7 +863,9 @@ clones' clone meta groups (Terminology and object model):
    agent rules). Above one hundred percent the agent passes a zero
    low-water mark — no dm events — as the value only means "auto-grow off"
    (Automatic reactions; `cnagent.md` CN13). The pool table carries no
-   feature argument, so the pool never skips block zeroing ([D15]).
+   feature argument but `no_discard_passdown` while a leg of the slice has
+   two sides (Migration, Host discards stop at the pool), so the pool
+   never skips block zeroing ([D15]).
 4. **Per thin device and slice**: a dm-thin volume `CnThinDevName`, created
    with the pool message "create_thin" of `dev_id` or "create_snap" of
    `dev_id` and `ori_id` — sent only while `ThinDevice.created` is false; a
@@ -2810,7 +2812,9 @@ give the rest. A pool's rows are:
   the bound (Repairs), since the steps that bound's text names, a keep's
   clear and a retired leg's delete, are refused without the key too;
 * a migration whose cutover is pending, with the primary's path row to
-  the new side, and past its cutover one whose copy is whole and waits for
+  the new side, and, while the primary's pool row of the leg's slice does
+  not read OK with a status line that keeps a host's discards, that fact
+  (`dnv-worker.md` RW18), and past its cutover one whose copy is whole and waits for
   its finish (in a pool whose revision key is absent, for the key, which
   the gateway's finish reads first and refuses without), whose copy row
   reads `RES_STATUS_ERROR`, or whose destination gives no reading of its
@@ -6093,12 +6097,12 @@ flight, and sends a write to a region it holds as copied straight to the
 destination; a copy still in flight then lands after that write and puts
 the source's bytes over it. So the agent's own discards reach a dm-clone
 only while no write can reach it and no copy is in flight on it
-(`agent.ApplySkipRanges`). A host's discard has no such guard: a clone's
-dm-clone takes it while the clone serves, and a thin pool passes it down
-to a migration's dm-clone on a leg past its cutover, where the thin pool
-commits the block's removal only later (`scope.md` entries "A host's
-discard can make a migration skip a block" and "A host's discard during a
-clone's copy can undo a later write").
+(`agent.ApplySkipRanges`). A host's discard has no such guard on a clone:
+a clone's dm-clone takes it while the clone serves (`scope.md` entry "A
+host's discard during a clone's copy can undo a later write"). A
+migration's dm-clone never takes one: the primary's thin pool keeps the
+hosts' discards from the legs while a leg has two sides (Migration, Host
+discards stop at the pool).
 The agent stops the background copy when it runs and waits, for a short
 bound, until the status shows no copy in flight, going on when the bound
 passes: this wait holds no IO back and keeps the pause that follows short.
@@ -6543,7 +6547,8 @@ exemptions — every RPC stays short.
 
 **Cutover.** Beside the provisioned flip the sp role starts each
 migration's cutover, once the destination side reports that it waits for
-it and the primary reports a live path to that side: one transaction
+it and the primary reports a live path to that side, and that the pool of
+the migration's slice keeps the hosts' discards: one transaction
 clears the migration's `cutover_pending` and bumps `SpRev` (Migration;
 `dnv-worker.md` RW18, MD6). The bump's fan-out hands the source side
 `dst_provisioned` true, and the source starts its steps.
@@ -7077,11 +7082,24 @@ destination's export as to any provisioned side, a second path of the
 leg's multipath namespace (`cnagent.md` CN10), and reports a path row for
 each side of the leg (`cnagent.md` CN28). The source serves on.
 
+**Host discards stop at the pool.** While a leg of a slice has two sides
+the primary loads the slice's thin pool with the feature
+`no_discard_passdown` (`cnagent.md` CN13): a host's discard still frees
+the block in the pool and goes no further, so it never reaches the legs.
+Reason: past the cutover a discard that reached the destination's
+dm-clone would mark its region copied with no copy, while the pool
+commits the block's removal only up to a second later; a primary that
+died in that second would leave a new primary whose pool still maps the
+block, read from the destination, which holds a reused extent's old
+bytes there. A meta group's leg takes the feature too, though no host
+discard reaches the metadata device: the rule stays one line.
+
 **The cutover.** The sp worker starts the cutover once two reports hold:
 the destination's migration rows wait for it with that reason, and the
 primary's path row of the destination reads OK, a live controller to it,
-in the primary's own reply, read from that reply alone (`dnv-worker.md`
-RW18). One transaction clears the migration's `cutover_pending` and bumps
+in the primary's own reply, read from that reply alone, whose pool row of
+the migration's slice also reads OK with a status line that keeps the
+hosts' discards (`dnv-worker.md` RW18). One transaction clears the migration's `cutover_pending` and bumps
 `SpRev`, after it checks that the pool's level is below
 `SP_LEVEL_NO_MIGRATION` and checks again that the flag is set, the
 destination provisioned and the reporting cntlr still the primary and not
@@ -9145,8 +9163,9 @@ document and the component documents cite it by its id.
   provisioned, and dm-thin writes a block it provisions whole — zeros
   around a write that covers only part of it — before a host can read any
   of it. dnv's thin pools therefore never skip block zeroing: the pool
-  table carries no feature arguments, "skip_block_zeroing" among them, so
-  dm-thin's default holds (`cnagent.md` CN13 builds the table), and a pool
+  table carries no feature argument but "no_discard_passdown" while a leg
+  of the slice has two sides, never "skip_block_zeroing", so dm-thin's
+  default holds (`cnagent.md` CN13 builds the table), and a pool
   that skipped it would hand a host whatever a recycled extent holds
   around a partial write, as the cn suite's isolation case shows on the
   lab's kernel over legs that hold old bytes (`cnagent_integtest.md`,
@@ -10901,8 +10920,10 @@ document and only pointed to here.
   find no DN candidates, a slice whose data list is full takes no more
   group (GrowSlice; `dnv-worker.md` AR6 and Known limits), and nothing
   reserves space ahead — so a pool's data space can run out before a grow
-  lands. The cn agent writes no feature arguments to the thin-pool table
-  (`cnagent.md` CN13 gives the table), so an exhausted pool behaves as
+  lands. The cn agent writes no feature argument to the thin-pool table but
+  "no_discard_passdown" while a leg of the slice has two sides, never
+  "error_if_no_space" (`cnagent.md` CN13 gives the table), so an exhausted
+  pool behaves as
   dm-thin's default "queue_if_no_space": IO needing a new block queues for
   the kernel's "no_space_timeout" (a dm-thin module parameter) and then
   fails with EIO, while already-provisioned blocks keep serving. A

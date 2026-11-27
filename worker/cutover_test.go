@@ -67,8 +67,16 @@ func awaitingSideInfo() *pb.SideInfo {
 }
 
 // pathInfo is a cntlr report whose path rows read OK for the live sides and
-// MISSING for the others of the fixture's migration leg.
+// MISSING for the others of the fixture's migration leg, beside the pool
+// row of the migration's slice, OK and keeping a host's discards from the
+// legs, as a primary's reads while the leg has two sides (cnagent.md CN13).
 func pathInfo(live ...uint64) *pb.CntlrInfo {
+	return pathInfoPool(poolRowKeeping("no_discard_passdown"), live...)
+}
+
+// pathInfoPool is pathInfo with pool as the migration's slice's pool row,
+// none when nil.
+func pathInfoPool(pool *pb.ResInfo, live ...uint64) *pb.CntlrInfo {
 	rows := map[uint64]*pb.ResInfo{
 		spSideSrc: resStatus("path-src", pb.ResStatus_RES_STATUS_MISSING),
 		spSideDst: resStatus("path-dst", pb.ResStatus_RES_STATUS_MISSING),
@@ -76,7 +84,21 @@ func pathInfo(live ...uint64) *pb.CntlrInfo {
 	for _, sideId := range live {
 		rows[sideId] = resOk("path")
 	}
-	return &pb.CntlrInfo{SideIdToPath: rows}
+	info := &pb.CntlrInfo{SideIdToPath: rows}
+	if pool != nil {
+		info.SliceIdToDmPool = map[uint64]*pb.ResInfo{spSliceA: pool}
+	}
+	return info
+}
+
+// poolRowKeeping is an OK pool row whose details, the pool's status line,
+// carry the discard word.
+func poolRowKeeping(word string) *pb.ResInfo {
+	return &pb.ResInfo{
+		Status: pb.ResStatus_RES_STATUS_OK,
+		Details: "0 1024 thin-pool 3 12/4096 5/62 - rw " + word +
+			" queue_if_no_space - 1024",
+	}
 }
 
 // TestSpSideRequestsCarryTheCutoverFlag pins RW15's migration confs around
@@ -312,6 +334,63 @@ func TestSpCutoverConditions(t *testing.T) {
 			}
 			want := cutoverCall{spName: testSpName, ref: spCutoverRef,
 				cntlrId: tc.want}
+			if len(calls) != 1 || calls[0] != want {
+				t.Fatalf("cutover calls = %+v, want one %+v", calls, want)
+			}
+		})
+	}
+}
+
+// TestSpCutoverWaitsForThePoolToKeepDiscards is the fourth condition of
+// the cutover beside RW18's flip: the reply that shows the primary's live
+// path to the dst side must also show the pool row of the migration's slice
+// OK with a status line that keeps a host's discards from the legs, so that
+// no discard of a host reaches the new side's dm-clone once it serves
+// (cnagent.md CN13; architecture.md, Migration). A pool that passes
+// discards down, no pool row, a row that is not OK, a line with no discard
+// word and another slice's pool that keeps them start nothing.
+func TestSpCutoverWaitsForThePoolToKeepDiscards(t *testing.T) {
+	other := func() *pb.CntlrInfo {
+		info := pathInfoPool(nil, spSideDst)
+		info.SliceIdToDmPool = map[uint64]*pb.ResInfo{
+			spSliceA + 1: poolRowKeeping("no_discard_passdown"),
+		}
+		return info
+	}
+	failed := poolRowKeeping("no_discard_passdown")
+	failed.Status = pb.ResStatus_RES_STATUS_ERROR
+	for _, tc := range []struct {
+		name string
+		info *pb.CntlrInfo
+		want bool
+	}{
+		{"a pool that keeps discards", pathInfoPool(
+			poolRowKeeping("no_discard_passdown"), spSideDst), true},
+		{"a pool that ignores discards", pathInfoPool(
+			poolRowKeeping("ignore_discard"), spSideDst), true},
+		{"a pool that passes discards down", pathInfoPool(
+			poolRowKeeping("discard_passdown"), spSideDst), false},
+		{"no pool row", pathInfoPool(nil, spSideDst), false},
+		{"a pool row that is not OK", pathInfoPool(failed, spSideDst), false},
+		{"a line with no discard word", pathInfoPool(&pb.ResInfo{
+			Status:  pb.ResStatus_RES_STATUS_OK,
+			Details: "0 1024 thin-pool 3 12/4096 5/62",
+		}, spSideDst), false},
+		{"another slice's pool keeps discards", other(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w, ops, _ := cutoverWorker(t, true, testSpRev+1)
+			w.handleReports(spReport{cntlrId: spCntlrPrimary,
+				paths: newPathReport(7, tc.info)})
+			calls := ops.cutoverCalls()
+			if !tc.want {
+				if len(calls) != 0 {
+					t.Fatalf("cutover started: %+v", calls)
+				}
+				return
+			}
+			want := cutoverCall{spName: testSpName, ref: spCutoverRef,
+				cntlrId: spCntlrPrimary}
 			if len(calls) != 1 || calls[0] != want {
 				t.Fatalf("cutover calls = %+v, want one %+v", calls, want)
 			}

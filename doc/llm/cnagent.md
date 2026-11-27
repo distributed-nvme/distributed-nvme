@@ -3120,14 +3120,33 @@ that slice's pool step, and with it the slice's snapshot messages, until
 its next pass, so a snapshot whose messages that pass sends is torn
 (CN14, "A torn snapshot is reported").
 
-The pool table carries no feature arguments, so dm-thin's defaults
-apply. dm-thin then writes every block the pool provisions whole before a
-host can read any of it, because the table never asks it to skip block
-zeroing (the "skip_block_zeroing" feature, which `architecture.md`, [D15],
-rules out): that is what keeps the never-zeroed part of a data leg
-unreadable, and what CN12's `--assume-clean` rests on. A pool out of data
-space queues writes and then fails them when its own timeout runs out
-(`architecture.md`, Known limits).
+The pool table carries no feature arguments but one, so dm-thin's
+defaults apply otherwise. dm-thin then writes every block the pool
+provisions whole before a host can read any of it, because the table never
+asks it to skip block zeroing (the "skip_block_zeroing" feature, which
+`architecture.md`, [D15], rules out): that is what keeps the never-zeroed
+part of a data leg unreadable, and what CN12's `--assume-clean` rests on. A
+pool out of data space queues writes and then fails them when its own
+timeout runs out (`architecture.md`, Known limits).
+
+**Discards during a migration.** While a leg of any group of the slice,
+in the request, has two sides or more, which only a migration gives it,
+the pool table carries the one feature `no_discard_passdown` after its
+four arguments (`1 no_discard_passdown`), and none otherwise. A host's
+discard then still frees the block in the pool and goes no further, so it
+never reaches a leg, where a migration's destination would mark its region
+copied with no copy (`architecture.md`, Migration, Host discards stop at
+the pool). The converge and the read compare the pool's four arguments and
+whether its live table carries the word: dm-thin prints in its table line
+exactly the features its last load asked for, so the word is there only
+when a load put it there, and no other word is compared. A converge
+reloads a live pool whose table is against the rule, either way, as after a
+grow, and creates a pool with the feature when the rule asks for it, as a
+new primary's in the middle of a migration; the read reports such a table
+as any other pool table that differs. The pool row's details, its raw
+status line, carry the pool's live discard word (`discard_passdown`,
+`no_discard_passdown` or `ignore_discard`), which the worker's cutover
+reads (`dnv-worker.md` RW18).
 
 **The needs-check mark.** dm-thin sets a mark in the metadata superblock
 when a commit fails, as when every leg of a data group is lost for a few
@@ -3657,6 +3676,11 @@ on the disk nodes until the pool writes them again.
 
 The discard is best effort and bounded, since each chunk holds the pass,
 and its CN1 locks, until the kernel answers it. A slice takes no discard
+while a leg of its groups has two sides, as its pool then passes no discard
+down to its data device (CN13, Discards during a migration), so a discard
+would free the blocks in the pool alone, which the delete does anyway; the
+blocks of a volume deleted then stay in use on the disk nodes until the
+pool writes them again. Nor does a slice take a discard
 in a pass when one of these reads, each made once in the pass, says a
 discard could wait there or do nothing: a leg of the slice's groups that
 carries IO — a leg of a group's `leg_list` or a new leg of its open

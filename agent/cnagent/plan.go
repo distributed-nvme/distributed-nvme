@@ -277,6 +277,24 @@ type slicePlan struct {
 	dataBlocks  uint64
 }
 
+// keepsDiscards is CN13's discard rule of the slice's pool: true while a leg
+// of any of the slice's groups in the request has two sides or more, which
+// only a migration gives it (architecture.md, Migration).
+func (sp *slicePlan) keepsDiscards() bool {
+	for _, grps := range [][]*pb.Group{
+		sp.slice.GetMetaGrpList(), sp.slice.GetDataGrpList(),
+	} {
+		for _, grp := range grps {
+			for _, leg := range grp.GetLegList() {
+				if len(leg.GetSideList()) > 1 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // grpPlan is one group: a RedundNone dm-linear over its single leg's data
 // region, or a RedundMdRaid1 array over its member leg wrappers (CN12). It is
 // a slice's group, or a clone's clone meta group (architecture.md,
