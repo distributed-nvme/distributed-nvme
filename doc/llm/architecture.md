@@ -9148,7 +9148,9 @@ document and the component documents cite it by its id.
   CRC-protected volume-table slots (so a torn write can only damage the
   older copy), a fixed clone-metadata slot area and an extent area at
   `DnDataOffset` — all read and written natively in Go through the
-  `OsClient`'s `ReadBlock` and `WriteBlock`. A side is one aggregate
+  `OsClient`'s `ReadBlock` and `WriteBlock`, but the check round's header
+  read, which reads past the page cache with `ReadBlockDirect`
+  (`dnagent.md` DN18). A side is one aggregate
   dm-linear `DnSideName` concatenating the side's extent runs, and a
   migration's dm-clone metadata is a slot plus a wrapper dm-linear
   `DnMigrMetaDmName`. **The on-disk volume table, not the agent's local

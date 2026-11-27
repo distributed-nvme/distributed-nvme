@@ -887,8 +887,9 @@ before calling the `OsClient` (the soft/hard timeout contract of
 `architecture.md`, Common validation; `osclient.md`, RunCommand, handles
 SIGTERM and SIGKILL). A role package that calls the `OsClient` directly
 instead of through a wrapper — `cnagent.md` CN25's read of the `thin_dump`
-file, and the dn's raw-device `ReadBlock`/`WriteBlock` calls of the [D13]
-disk metadata (`DiskMeta`) — takes the same bound from the exported
+file, and the dn's raw-device `ReadBlock`/`ReadBlockDirect`/`WriteBlock`
+calls of the [D13] disk metadata (`DiskMeta`) — takes the same bound from
+the exported
 `agent.CmdCtx`. Of the shared wrappers, `Dm.DiscardRanges` is the one call
 that passes its caller's ctx on unchanged, and `cnagent.md` CN14's discard
 of a deleted thin volume, which calls `OsClient.DiscardRanges` directly for
@@ -1057,8 +1058,9 @@ logical block size its `queue/` directory keeps; the cn's are `cnagent.md`
 CN28's, and CN12's superblock read and `lsblk` of the array node — the walk
 of "/sys/class/nvme-subsystem" and "/sys/class/nvme" for every nvme host fact —
 the namespace device, controller liveness and ANA state alike (SH20,
-`cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and `ReadBlock`
-of the disk header for the DN's [D13] metadata. No LVM report is probed
+`cnagent.md` CN12 and CN28) — configfs **reads** for nvmet, and a read of
+the disk header with O_DIRECT (`ReadBlockDirect`) for the DN's [D13]
+metadata (DN18). No LVM report is probed
 anywhere ([D14]). A partition has no `queue/`, and a `partition` file under
 the number marks one: its block size read goes on through `..`, which the
 kernel resolves in the disk's directory once it has followed the number's
@@ -4454,9 +4456,18 @@ needed, and the worker never turns one into an `err_epoch`
 * `DnInfo.disk_info`, named by the `--disk` path: the disk's size and
   logical block size reads succeed and the block size is 512, by DN3's
   rule and the converge's own text, so a read and a converge report one
-  row (DN5).
-* `DnInfo.meta_info`, named by the `--disk` path: a `ReadBlock` of the
-  header checks magic, version, CRC, the three layout fields against this
+  row (DN5). It reads sysfs and the device's number alone, so it checks
+  that the device is there with its geometry, not that it can be read.
+* `DnInfo.meta_info`, named by the `--disk` path: a read of the header
+  with O_DIRECT (`ReadBlockDirect`), so the disk answers it, not the page
+  cache a side device keeps alive while it holds the disk open — a disk
+  that fails every read reads `RES_STATUS_ERROR` here, which a buffered
+  read could miss; the read cannot be cut off once it has started, and
+  waits for as long as the disk holds the IO (`osclient.md`,
+  ReadBlockDirect), holding the node read lock (a `SyncupDn` of the DN then
+  waits for it) and an `OsClient` slot, but not the disk table's lock, which
+  it takes only after the read. It checks magic, version, CRC, the three
+  layout fields against this
   build's constants (DN5) and the `cluster_id`/`dn_id`/`extent_size`
   identity (`DiskMeta.ProbeHeader`) — a header other than the one the loaded
   volume table came from (blank, corrupt, of another layout, or valid with

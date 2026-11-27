@@ -535,6 +535,10 @@ func TestDiskMetaProbeHeader(t *testing.T) {
 // not answer proves nothing and keeps both.
 func TestDiskMetaProbeDropsATableTheDiskNoLongerHolds(t *testing.T) {
 	ctx := context.Background()
+	// The probe reads the header with O_DIRECT (DN18); a table's load reads
+	// it buffered.
+	probeHeader := fmt.Sprintf("readblockdirect %s off=%d len=%d",
+		metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
 	header := fmt.Sprintf("readblock %s off=%d len=%d",
 		metaDisk, common.DnHeaderOffset, common.DnHeaderSize)
 	wipe := func(node *fakeNode) {
@@ -578,7 +582,7 @@ func TestDiskMetaProbeDropsATableTheDiskNoLongerHolds(t *testing.T) {
 		}},
 		{name: "did not answer", found: true, kept: true, change: func(
 			t *testing.T, meta *DiskMeta, node *fakeNode) {
-			setHook(node, node.killRead, header)
+			setHook(node, node.killRead, probeHeader)
 		}},
 	} {
 		meta, node := formatted(t)
@@ -1995,14 +1999,14 @@ func TestDiskMetaAllocIsDeterministic(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestDiskMetaBlockCallsCarryTheSoftTimeout: DiskMeta calls the OsClient
-// directly, so each ReadBlock and WriteBlock it makes must reach it on a ctx
-// carrying the soft timeout of agent.CmdCtx (architecture.md, Common
-// validation; SH15). The ctx the test hands in carries no deadline, so any
+// directly, so each ReadBlock, ReadBlockDirect and WriteBlock it makes must
+// reach it on a ctx carrying the soft timeout of agent.CmdCtx (architecture.md,
+// Common validation; SH15). The ctx the test hands in carries no deadline, so any
 // deadline a call carries is DiskMeta's own.
 func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 	_, node := newTestMeta(t)
 	oc := node.osClient()
-	var reads, writes int
+	var reads, directReads, writes int
 	var unbounded []string
 	bounded := func(ctx context.Context) bool {
 		deadline, ok := ctx.Deadline()
@@ -2010,6 +2014,17 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 			time.Until(deadline) <= common.CmdSoftTimeout*time.Second
 	}
 	readBlock, writeBlock := oc.ReadBlockFn, oc.WriteBlockFn
+	readDirect := oc.ReadBlockDirectFn
+	oc.ReadBlockDirectFn = func(
+		ctx context.Context, path string, offset uint64, length uint64,
+	) ([]byte, error) {
+		directReads++
+		if !bounded(ctx) {
+			unbounded = append(unbounded,
+				fmt.Sprintf("readblockdirect off=%d len=%d", offset, length))
+		}
+		return readDirect(ctx, path, offset, length)
+	}
 	oc.ReadBlockFn = func(
 		ctx context.Context, path string, offset uint64, length uint64,
 	) ([]byte, error) {
@@ -2038,8 +2053,8 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 	ctx := context.Background()
 
 	// EnsureFormatted's header read and its slot and header writes, a table
-	// write, the clone-metadata zeroing, a header probe, and a fresh load of
-	// the header and both slots.
+	// write, the clone-metadata zeroing, a header probe (a direct read), and
+	// a fresh load of the header and both slots.
 	meta := open()
 	if err := meta.EnsureFormatted(
 		ctx, testCluster, testDn, metaExtentSize, mayFormat); err != nil {
@@ -2061,9 +2076,9 @@ func TestDiskMetaBlockCallsCarryTheSoftTimeout(t *testing.T) {
 		t.Fatalf("SideRecords after a reload: %v", err)
 	}
 
-	if reads == 0 || writes == 0 {
-		t.Fatalf("%d block reads and %d block writes: the check is vacuous",
-			reads, writes)
+	if reads == 0 || directReads == 0 || writes == 0 {
+		t.Fatalf("%d block reads, %d direct reads and %d block writes: the "+
+			"check is vacuous", reads, directReads, writes)
 	}
 	if len(unbounded) != 0 {
 		t.Errorf("block calls without the SH15 soft timeout: %v",

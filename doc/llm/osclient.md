@@ -463,7 +463,8 @@ the method set is exactly the following, each taking the caller's ctx:
 The raw-device metadata path of `architecture.md`, [D13]: the dn agent reads
 and writes its own on-disk format (header block, A/B volume-table slots,
 dm-clone metadata slots) directly on the `--disk` device through these two
-methods.
+methods, but its check round's read of the header, which goes through
+ReadBlockDirect (`dnagent.md` DN18).
 
 * Each checks the ctx error after acquiring the semaphore, exactly like the
   file methods.
@@ -509,7 +510,9 @@ cache. The md replay reads its legs' superblock areas the same way, and
 reads back past the page cache the block it wrote through its array
 (`dnagent.md` CM5). The CSI node plugin reads a volume's start the same way
 before it formats it (`csi.md` CSI17), so the bytes it judges are the
-device's own now, never a page the cache kept.
+device's own now, never a page the cache kept. The dn agent's check round
+reads its disk's header the same way (`dnagent.md` DN18), as a side device
+keeps the disk's page cache alive while it holds the disk open.
 
 * It takes one semaphore slot, checks the ctx error after acquiring it,
   and runs the body of the probe's helper `ReadBlockDirectAt`: the
@@ -519,8 +522,10 @@ device's own now, never a page the cache kept.
   the device holds the IO, and holds its slot until then, as a command whose
   child sits in an uninterruptible kernel wait does (RunCommand). Its
   callers read a leg that serves, or the md replay's loop devices and its
-  array over them; but a disk node that stalls while the leg's path stays
-  live holds the superblock read without limit, and with it the slot; the
+  array over them, or the dn agent's own disk; but a disk node that stalls
+  while the leg's path stays live holds the superblock read without limit,
+  and with it the slot, and so does a dn agent's disk that stops answering
+  its check round's header read (`dnagent.md` DN18); the
   leg probe, whose IO waits by design, never uses it (Exported raw helpers
   and the probe-IO carve-out). The node plugin's read of a volume's start
   waits the same way when every path of the volume goes between blkid and

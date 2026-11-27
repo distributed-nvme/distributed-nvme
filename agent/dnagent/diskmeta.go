@@ -26,7 +26,9 @@ import (
 // same layout.
 //
 // Every method loads lazily on first use and is safe for concurrent callers;
-// all raw-device IO goes through OsClient.ReadBlock/WriteBlock ([D13]).
+// all raw-device IO goes through OsClient.ReadBlock/WriteBlock, but the check
+// round's header read, which goes through OsClient.ReadBlockDirect so that no
+// page cache answers it (ProbeHeader, DN18) ([D13]).
 type DiskMeta struct {
 	oc   common.OsClient
 	disk string
@@ -120,6 +122,23 @@ func (d *DiskMeta) readBlock(
 	cctx, cancel := agent.CmdCtx(ctx)
 	defer cancel()
 	return d.oc.ReadBlock(cctx, d.disk, offset, length)
+}
+
+// readBlockDirect is readBlock with O_DIRECT (OsClient.ReadBlockDirect): no
+// page cache answers it, so it reads what the device holds now. The kernel
+// keeps the disk's cache while a side device holds the disk open, so a
+// buffered read of a disk that fails every read can still answer (DN18). The
+// soft timeout bounds only its wait for an OsClient slot: once started, the
+// read waits for as long as the device holds the IO. It reads only immutable
+// fields, so a caller need not hold d.mu.
+func (d *DiskMeta) readBlockDirect(
+	ctx context.Context,
+	offset uint64,
+	length uint64,
+) ([]byte, error) {
+	cctx, cancel := agent.CmdCtx(ctx)
+	defer cancel()
+	return d.oc.ReadBlockDirect(cctx, d.disk, offset, length)
 }
 
 func (d *DiskMeta) writeBlock(
@@ -711,6 +730,16 @@ func (d *DiskMeta) ProbeHeader(
 	dnId uint64,
 	extentSize uint64,
 ) (string, error) {
+	// With O_DIRECT: the check round reads the disk itself, not the page
+	// cache a side device keeps alive, so a disk that fails its reads reads
+	// in error here (DN18). The read comes before d.mu: once started it
+	// waits for as long as the disk holds the IO, and a lookup of the table
+	// in memory need not wait with it.
+	raw, err := d.readBlockDirect(ctx, common.DnHeaderOffset,
+		common.DnHeaderSize)
+	if err != nil {
+		return "", fmt.Errorf("reading the disk header: %w", err)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	// The lazy load populates the table counts Describe reports. It writes
@@ -718,10 +747,6 @@ func (d *DiskMeta) ProbeHeader(
 	// (DN16, SH29); what it can change is this cache (below).
 	if err := d.load(ctx); err != nil {
 		return "", err
-	}
-	raw, err := d.readBlock(ctx, common.DnHeaderOffset, common.DnHeaderSize)
-	if err != nil {
-		return "", fmt.Errorf("reading the disk header: %w", err)
 	}
 	hdr, ok, err := parseDnHeader(raw)
 	if err != nil {

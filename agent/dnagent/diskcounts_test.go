@@ -110,8 +110,10 @@ func TestDnInfoCountsNeedASizeAndThisDnsDisk(t *testing.T) {
 	t.Run("a header read that did not answer", func(t *testing.T) {
 		srv, node := newTestServer(t)
 		syncupBoth(t, srv, 1, testSide)
-		setHook(node, node.killRead, fmt.Sprintf("readblock %s off=%d len=%d",
-			testDisk, common.DnHeaderOffset, common.DnHeaderSize))
+		// The read's header read is the probe's, with O_DIRECT (DN18).
+		setHook(node, node.killRead, fmt.Sprintf(
+			"readblockdirect %s off=%d len=%d", testDisk,
+			common.DnHeaderOffset, common.DnHeaderSize))
 		info := dnInfoOf(t, srv)
 		if got := info.GetMetaInfo().GetStatus(); got !=
 			pb.ResStatus_RES_STATUS_ERROR {

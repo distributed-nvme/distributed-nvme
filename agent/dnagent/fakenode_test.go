@@ -419,6 +419,7 @@ func (f *fakeNode) osClient() *common.FakeOsClient {
 		WriteFileFn:       f.writeFile,
 		WriteFileDirectFn: f.writeFileDirect,
 		ReadBlockFn:       f.readBlock,
+		ReadBlockDirectFn: f.readBlockDirect,
 		WriteBlockFn:      f.writeBlock,
 		DiscardRangesFn:   f.discardRanges,
 		ReadProtoFn:       f.readProto,
@@ -475,6 +476,7 @@ var readOnlyPrefixes = []string{
 	// the moment a converge started sweeping.
 	"cmd dmsetup ls",
 	"cmd nvme list-subsys", "read ", "readproto ", "readblock ",
+	"readblockdirect ",
 }
 
 // Mutations returns only the calls that change the system.
@@ -1036,6 +1038,56 @@ func (f *fakeNode) readBlock(
 	if err := f.readHookErr(line); err != nil {
 		return nil, err
 	}
+	size, ok := f.devSize[path]
+	if !ok {
+		return nil, fmt.Errorf("no such device: %s", path)
+	}
+	if offset+length > size {
+		return nil, fmt.Errorf("short read: %s off=%d len=%d size=%d",
+			path, offset, length, size)
+	}
+	out := make([]byte, length)
+	for _, seg := range f.blocks[path] {
+		lo := max64(seg.off, offset)
+		hi := min64(seg.off+uint64(len(seg.data)), offset+length)
+		if lo >= hi {
+			continue
+		}
+		copy(out[lo-offset:hi-offset], seg.data[lo-seg.off:hi-seg.off])
+	}
+	return out, nil
+}
+
+// readBlockDirect is readBlock with O_DIRECT: no page cache answers it. Its
+// line is `readblockdirect <dev> off=<o> len=<n>`, so a test fails the device
+// under direct IO alone (failReadAlways on that line) while a buffered read,
+// which the kernel can answer from its cache, still reads.
+func (f *fakeNode) readBlockDirect(
+	ctx context.Context, path string, offset uint64, length uint64,
+) ([]byte, error) {
+	f.mu.Lock()
+	line := fmt.Sprintf("readblockdirect %s off=%d len=%d", path, offset,
+		length)
+	f.record("%s", line)
+	f.recordTrace(ctx, line)
+	err := f.readHookErr(line)
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	if offset%4096 != 0 || length%4096 != 0 || length == 0 {
+		return nil, fmt.Errorf("unaligned direct read: off=%d len=%d",
+			offset, length)
+	}
+	return f.readBlockQuiet(path, offset, length)
+}
+
+// readBlockQuiet is readBlock's answer with no record and no hook.
+func (f *fakeNode) readBlockQuiet(
+	path string, offset uint64, length uint64,
+) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	size, ok := f.devSize[path]
 	if !ok {
 		return nil, fmt.Errorf("no such device: %s", path)

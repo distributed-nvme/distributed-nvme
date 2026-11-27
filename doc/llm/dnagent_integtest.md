@@ -16,11 +16,12 @@ specifies on two lab VMs driven over gRPC from the developer machine,
 exercising every `DiskNodeAgent` RPC and reading the kernel state itself
 beside the agent's report. It proves the happy path: error paths are out of
 scope but for the restart case's stale probe, migr_full's lost source,
-store_full's full local store and blocksize's disks of another block size,
-and a leftover reply is no exception, being an accepted request with residue
+store_full's full local store, blocksize's disks of another block size and
+diskread's disk that fails every read, and a leftover reply is no exception, being an accepted request with residue
 (`dnagent.md` SH9, DN19).
 The cases run in a fixed order, fail-fast — smoke, zeroing, sides, migr_full,
-migr_bitmap, teardown, restart, loglevel, store_full, blocksize — each that
+migr_bitmap, teardown, restart, loglevel, store_full, blocksize, diskread —
+each that
 builds a pool under storage-pool ids of its own, and each ends with neither
 node holding anything of its pool; loglevel and blocksize build none, and
 blocksize ends with nothing of its own left on its node.
@@ -463,6 +464,15 @@ blocks, `GetDnSize` is refused. The case removes its nvmet port, its loop
 devices and their files at its end. A disk formatted at 512 that reads 4096
 later, which converges as it is, is left to the unit tests.
 
+**diskread** proves `dnagent.md` DN18's meta row: dn1's agent runs on a
+dm-linear over its loop device, a side device holds that disk open, and the
+disk's table is then swapped for an error target, so the disk fails every
+read; a fresh round's `meta_info` reads `RES_STATUS_ERROR`, as the check
+round reads the header with O_DIRECT rather than through the page cache the
+side device keeps alive, and reads `RES_STATUS_OK` again once the disk's
+table is back. The agent returns to its loop device at the end, and the
+suite's cleanup removes the dm-linear disk of a run that failed.
+
 **What a pass means.** Exit status zero and PASS mean every case's assertions
 held in a run that stops at the first failure: data checked against a pattern
 file the agent never sees or against zeros, removals proved by the node's own
@@ -496,7 +506,9 @@ Ctrl-C while the start-of-run cleanup's helpers clean the VMs ends no helper,
 and the handler waits for them first. The scrub takes every `dnv-agent` and
 every dnv dm device on the node, of either role, which is why one dnv suite
 runs at a time in the lab (`layout.md`, Directory tree), and the blocksize
-case's nvmet port and loop devices beside the suite's own. Each step is
+case's nvmet port and loop devices beside the suite's own, and the diskread
+case's dm-linear disk (`itdisk-*`), resumed with the dnv devices and removed
+after every agent device stacked on it and before its loop device. Each step is
 best-effort, and the order is load-bearing on one principle, a holder goes
 before what it holds: the agents go first, a graceful stop joining their
 children (`dnagent.md` SH27) while one killed outright can leave a zeroing
@@ -541,14 +553,15 @@ only reported, a guest's own not being the suite's to fail on.
 ## Out of scope
 
 Error paths beyond the stale probe, migr_full's lost source, store_full's
-full local store and blocksize's disks of another block size, the
+full local store, blocksize's disks of another block size and diskread's
+disk that fails every read, the
 provisioning error rows among them (`dnagent.md` DN9); a migration
 destination that waits for a free run in the clone-metadata area,
 and the other states of the destination's shared row rule, whose rows the unit
 tests cover (DN13); the destination's retries of a failed connect within its
 pass, left to the unit tests (DN13); the cn role; fault injection under a live
-stack beyond that lost source, the teardown case removing a real remote
-instead; a shutdown that meets a background task starting or a fence timer
+stack beyond that lost source and diskread's error table under a side's
+disk, the teardown case removing a real remote instead; a shutdown that meets a background task starting or a fence timer
 armed (`dnagent.md` SH27) and whether a refused request leaves a lock entry
 (`dnagent.md`, Concurrency — `locks.go`), both left to the unit tests;
 performance; TLS and authentication; levels other than read-write and

@@ -171,7 +171,7 @@ SETUP_DONE=0
 STORE_VM=""
 
 CASES=(smoke zeroing sides migr_full migr_bitmap teardown restart loglevel
-	store_full blocksize)
+	store_full blocksize diskread)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -1828,8 +1828,12 @@ cleanup() {
 	# open — not even `dmsetup remove --force`.
 	kill_pins
 
-	# Nothing may stay suspended from here on (see resume_suspended).
+	# Nothing may stay suspended from here on (see resume_suspended), the
+	# diskread case's own disk included, which carries no dnv name.
 	resume_suspended
+	for name in $(dmsetup ls 2>/dev/null | awk '$1 ~ /^itdisk-/ {print $1}'); do
+		timeout 10 dmsetup resume "$name" >/dev/null 2>&1
+	done
 
 	# nvmet controllers must die before nvmet teardown.
 	disconnect_kind 2
@@ -1849,6 +1853,11 @@ cleanup() {
 	dm_remove_kind d0
 	dm_remove_kind d4
 	for name in $(agent_dm_names); do
+		dm_force_remove "$name"
+	done
+	# The diskread case's own disk, a dm-linear over the loop device, goes
+	# after every agent device stacked on it and before its loop device.
+	for name in $(dmsetup ls 2>/dev/null | awk '$1 ~ /^itdisk-/ {print $1}'); do
 		dm_force_remove "$name"
 	done
 
@@ -2426,13 +2435,13 @@ preflight_vms() {
 # debug, or at the level a second argument names, or with no --log-level at
 # all when that argument is empty (dnagent_integtest.md, Conventions, Log
 # level).
-start_agent() {
-	local idx=$1 level=${2-debug} flag=""
+start_agent() { # idx [level] [disk]
+	local idx=$1 level=${2-debug} disk=${3:-${LOOP[$1]}} flag=""
 	[ -z "$level" ] || flag="--log-level $level"
 	sshv "$idx" "setsid nohup $WORK/dnv-agent dn \
 --grpc-network tcp --grpc-address ${IP[$idx]}:$GRPC_PORT \
 --tr-type tcp --adr-fam ipv4 --tr-addr ${IP[$idx]} --tr-svc-id $TR_SVC_ID \
---local-store $WORK/store --disk ${LOOP[$idx]} $flag \
+--local-store $WORK/store --disk $disk $flag \
 >> $WORK/agent.log 2>&1 < /dev/null & echo launched"
 }
 
@@ -4834,6 +4843,67 @@ teardown_pinned_side() {
 	# device did.
 	ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" >/dev/null
 	DIAG_SIDES=()
+}
+
+# ---------------------------------------------------------------------------
+# Case — diskread (dnagent_integtest.md, Cases)
+# ---------------------------------------------------------------------------
+
+# case_diskread proves dnagent.md DN18's meta row: dn1's agent runs on a
+# dm-linear over its loop device, a side device holds that disk open, and
+# the disk is then loaded with an error table, so it fails every read; the
+# check round reads the header with O_DIRECT, not through the page cache the
+# side device keeps alive, so its meta row reads ERROR. The disk's table
+# back, the row reads OK again.
+case_diskread() {
+	CASE=diskread
+	local dn=1 sp=0xe5 leg=0x1 side=0x31 cn=0x21
+	local disk="itdisk-1" sectors out provrev status
+	stage disk "dn1's agent on a dm-linear disk over its loop device"
+	stop_agent "$dn"
+	sectors=$(sshv "$dn" "blockdev --getsz ${LOOP[$dn]}")
+	sshv "$dn" "dmsetup create $disk --table '0 $sectors linear ${LOOP[$dn]} 0'"
+	start_agent "$dn" debug "/dev/mapper/$disk"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "diskread dn$dn size"
+
+	stage side "a side on it, so a side device holds the disk open"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE" --side "$sp:$leg:$side")
+	assert_dn_info_ok "$out" "diskread syncup-dn"
+	bump_rev "$dn"
+	provrev=${REV[$dn]}
+	bump_rev "$dn"
+	sync_side_2phase "$dn" "$provrev" "${REV[$dn]}" "$sp" "$leg" "$side" \
+		--ext-cnt 1 --zero-bytes "$DATA_ZERO_BYTES" \
+		--cntlid-slot 0 --primary-cn "$cn" --sp-level readwrite
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_ok "$out" ".dn_info.meta_info.status" "diskread meta before the fault"
+
+	stage fail "the disk fails every read: the check round's meta row reads ERROR"
+	sshv "$dn" "dmsetup suspend $disk && dmsetup load $disk --table '0 $sectors error' && dmsetup resume $disk"
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}" 2>/dev/null || true)
+	status=$(jq_of "$out" '.dn_info.meta_info.status // ""')
+	[ "$status" = RES_STATUS_ERROR ] ||
+		die "diskread: the meta row on a disk that fails every read is '$status', want RES_STATUS_ERROR: $out"
+
+	stage back "the disk's table back: the meta row reads OK again"
+	sshv "$dn" "dmsetup suspend $disk && dmsetup load $disk --table '0 $sectors linear ${LOOP[$dn]} 0' && dmsetup resume $disk"
+	out=$(ctl "$dn" check-dn --fresh --revision "${DNREV[$dn]}")
+	assert_ok "$out" ".dn_info.meta_info.status" "diskread meta after the fault"
+
+	stage teardown "an empty side list, then dn1's agent back on its loop device"
+	bump_dn_rev "$dn"
+	out=$(ctl "$dn" syncup-dn --revision "${REV[$dn]}" \
+		--extent-size "$EXTENT_SIZE")
+	assert_dn_info_ok "$out" "diskread teardown syncup-dn"
+	assert_no_residue "$sp"
+	stop_agent "$dn"
+	sshv "$dn" "dmsetup remove $disk"
+	start_agent "$dn"
+	out=$(ctl "$dn" get-dn-size --wait 20)
+	assert_eq "$(jq_of "$out" .size)" "$DATA_SIZE" "diskread dn$dn size on its loop device"
 }
 
 # ---------------------------------------------------------------------------
