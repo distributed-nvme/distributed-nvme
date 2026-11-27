@@ -145,6 +145,14 @@ func standbyPlanOf(nf *common.NameFmt, plan *cntlrPlan) *cntlrPlan {
 	req.Cntlr.Primary = false
 	standby := newCntlrPlan(nf, req)
 	standby.walk = plan.walk
+	// The marks of a shared NQN (CN16) are the node's, so they stay.
+	shared := make(map[string]string, len(plan.subsystems))
+	for _, ssp := range plan.subsystems {
+		shared[ssp.nqn] = ssp.shared
+	}
+	for _, ssp := range standby.subsystems {
+		ssp.shared = shared[ssp.nqn]
+	}
 	return standby
 }
 

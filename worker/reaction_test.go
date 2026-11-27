@@ -295,9 +295,13 @@ type fakeReactionOps struct {
 	dnBlackFilter bool
 	cnCands       []model.Cand
 	scanErr       error
-	opErr         error
-	calls         []reactionCall
-	queries       []candQuery
+	// sharedCn is what sharedNqnCnAddrs answers, and sharedNqns the
+	// nqn lists it was asked about.
+	sharedCn   []string
+	sharedNqns [][]string
+	opErr      error
+	calls      []reactionCall
+	queries    []candQuery
 	// The sp drain's canned returns (drain.go). drainErr is separate from
 	// opErr so a test can fail a drain step without failing every reaction —
 	// the two never run in the same pass (SPD6), and keeping them apart is
@@ -421,6 +425,18 @@ func (o *fakeReactionOps) findDnCandidates(
 		cands = kept
 	}
 	return cands, nil
+}
+
+func (o *fakeReactionOps) sharedNqnCnAddrs(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	nqnList []string,
+) ([]string, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.sharedNqns = append(o.sharedNqns, nqnList)
+	return o.sharedCn, nil
 }
 
 func (o *fakeReactionOps) findCnCandidates(
@@ -2977,6 +2993,31 @@ func TestReactionReplaceCntlrBlackList(t *testing.T) {
 			calls[0].spCn, query.spCn)
 	}
 	h.wantApplied(reactionReplaceCntlr)
+}
+
+// TestReactionReplaceCntlrSkipsSharedNqnCns: AR7's scan also black-lists
+// the CNs of the cntlrs of every other pool that holds a subsystem of an NQN
+// this pool holds, read for the pool's own nqn_list (cnagent.md CN16, A
+// shared NQN; architecture.md, Finding CN candidates).
+func TestReactionReplaceCntlrSkipsSharedNqnCns(t *testing.T) {
+	h := newReactHarness(t, reactFixture(t))
+	h.state.Cntlrs[reactCntlrB].ErrEpoch = h.ago(700)
+	h.state.Conf.NqnList = []string{"nqn.shared"}
+	h.rops.sharedCn = []string{"cn-shared:9000"}
+	h.cnCands(reactCnC)
+	h.pass()
+	h.wantOps("replace")
+	query := h.rops.allQueries()[0]
+	if fmt.Sprint(query.black) != fmt.Sprint([]string{reactCnB,
+		"cn-shared:9000"}) {
+		t.Fatalf("black = %v, want the old cntlr's CN and the shared one",
+			query.black)
+	}
+	if len(h.rops.sharedNqns) != 1 ||
+		fmt.Sprint(h.rops.sharedNqns[0]) != "[nqn.shared]" {
+		t.Fatalf("shared CNs asked for %v, want the pool's nqn_list",
+			h.rops.sharedNqns)
+	}
 }
 
 // TestReactionReplaceCntlrExcludesCntlrLocations pins AR7's tier-1 exclusion

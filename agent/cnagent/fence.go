@@ -57,6 +57,23 @@ type fenceLeg struct {
 type fenceNs struct {
 	nqn   string
 	nsIdx int
+	// devPath is the path of a host-facing namespace's own ns-dev, which
+	// the watch reads under a shared NQN (ownsFenceNs); empty for a
+	// transfer's, whose NQN no other pool names.
+	devPath string
+}
+
+// ownsFenceNs says whether the watch may count or move ns: always, but
+// under an NQN shared at this tick (CnAgentServer.nqnShared; CN16, A shared
+// NQN), where only a namespace whose device is the cntlr's own ns-dev
+// counts as served and moves, never another pool's. A read that does not
+// answer says no there.
+func (s *CnAgentServer) ownsFenceNs(ctx context.Context, ns fenceNs) bool {
+	if ns.devPath == "" || !s.nqnShared(ns.nqn) {
+		return true
+	}
+	path, ok, err := s.nvmet.NsDevicePath(ctx, ns.nqn, ns.nsIdx)
+	return err == nil && ok && strings.TrimSpace(path) == ns.devPath
 }
 
 // fenceInputs are the legs a primary's plan builds, not provisioning, the
@@ -82,7 +99,8 @@ func fenceInputs(plan *cntlrPlan) ([]fenceLeg, []fenceNs, []string) {
 	}
 	var nss []fenceNs
 	for _, np := range plan.namespaces {
-		nss = append(nss, fenceNs{nqn: np.ss.nqn, nsIdx: np.nsIdx})
+		nss = append(nss, fenceNs{nqn: np.ss.nqn, nsIdx: np.nsIdx,
+			devPath: plan.nf.DmPath(np.devName)})
 	}
 	for _, xp := range plan.xfers {
 		nss = append(nss, fenceNs{nqn: xp.nqn,
@@ -299,7 +317,8 @@ func (s *CnAgentServer) fenceServed(
 ) bool {
 	for _, ns := range nss {
 		grpId, present, err := s.nvmet.NsAnaGrpId(ctx, ns.nqn, ns.nsIdx)
-		if err == nil && present && grpId == common.AnaGrpIdOptimized {
+		if err == nil && present && grpId == common.AnaGrpIdOptimized &&
+			s.ownsFenceNs(ctx, ns) {
 			return true
 		}
 	}
@@ -340,6 +359,9 @@ func (s *CnAgentServer) fenceNamespaces(ctx context.Context, w *fenceWatch) {
 	for _, ns := range w.nss {
 		grpId, present, err := s.nvmet.NsAnaGrpId(ctx, ns.nqn, ns.nsIdx)
 		if err == nil && (!present || grpId == common.AnaGrpIdInaccessible) {
+			continue
+		}
+		if !s.ownsFenceNs(ctx, ns) {
 			continue
 		}
 		if s.moveDark(ctx, ns.nqn, ns.nsIdx) {

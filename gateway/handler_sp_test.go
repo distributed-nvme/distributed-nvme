@@ -3603,6 +3603,64 @@ func TestCreateCntlr(t *testing.T) {
 	}
 }
 
+// TestCreateCntlrSkipsSharedNqnCns: CreateCntlr's scan passes over the CNs of
+// the cntlrs of every other pool of the cluster that holds a subsystem of an
+// NQN this pool holds (architecture.md, Finding CN candidates; cnagent.md
+// CN16, A shared NQN): with every free CN such a pool's, it finds none.
+func TestCreateCntlrSkipsSharedNqnCns(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// shared is how many of the CNs that hold no cntlr of the SP a
+		// pool sharing its NQN holds a cntlr on.
+		shared int
+	}{{"one free CN left", sptCnCnt - sptCntlrCnt - 1},
+		{"no free CN left", sptCnCnt - sptCntlrCnt}} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := sptNewEnv(t, sptDnCnt, sptCnCnt, sptCnFree)
+			spId := env.createSp(sptDefaultSpec(sptSpName))
+			env.addSubsystem(spId)
+			own := make(map[string]bool)
+			for _, cntlrId := range env.spConf(sptSpName).GetCntlrIdList() {
+				own[env.cntlr(spId, cntlrId).GetAddrPort()] = true
+			}
+			other := &pb.SpConf{SpId: spId + 1000,
+				NqnList: []string{sptNqn}}
+			shared := make(map[string]bool)
+			for _, addr := range env.cnAddrs {
+				if own[addr] || len(shared) == tc.shared {
+					continue
+				}
+				id := uint64(len(other.CntlrIdList) + 1)
+				other.CntlrIdList = append(other.CntlrIdList, id)
+				mustPut(t, env.cli, model.CntlrKey(env.cid, other.SpId, id),
+					&pb.Cntlr{AddrPort: addr})
+				shared[addr] = true
+			}
+			mustPut(t, env.cli, model.SpConfKey(env.cid, "sp-shares"), other)
+			reply, err := env.srv.CreateCntlr(env.ctx,
+				&pb.CreateCntlrRequest{
+					ClusterName: env.name, SpName: sptSpName,
+					SpRev: &pb.SpRev{Revision: 1}, CntlidSlot: 2,
+				})
+			if len(shared)+len(own) == sptCnCnt {
+				if status.Code(err) != codes.ResourceExhausted {
+					t.Fatalf("CreateCntlr = %v, %v, want RESOURCE_EXHAUSTED",
+						reply, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("CreateCntlr: %v", err)
+			}
+			addr := env.cntlr(spId, reply.GetCntlrId()).GetAddrPort()
+			if shared[addr] || own[addr] {
+				t.Fatalf("the new cntlr landed on %s, a CN of the pool "+
+					"sharing the NQN or of the SP", addr)
+			}
+		})
+	}
+}
+
 // TestCreateCntlrRefusals pins the refusals of architecture.md, Cntlrs, all of
 // which write nothing: a cntlid_slot at or past CnCntlidSlotCnt, one the SP's
 // cntlid_slot_list does not name, one another cntlr of the SP already holds,

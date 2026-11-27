@@ -1825,6 +1825,77 @@ func TestCreateSubsystemWritesEntryAndCdc(t *testing.T) {
 	}
 }
 
+// TestCreateSubsystemSharedNqn is the gateway's check of a shared NQN
+// (architecture.md, Subsystems, namespaces; cnagent.md CN16, A shared NQN): an NQN that
+// another pool of the cluster holds a subsystem of is refused
+// FAILED_PRECONDITION naming that pool, unless share_nqn is set, as the
+// destination of a move sets it; with it, a controller node that holds a
+// cntlr of both pools is refused, naming the node, and two pools on
+// different nodes take the pair. A third pool that holds the NQN is refused
+// even with share_nqn, naming both, as at most two pools hold one NQN; two
+// pools of other NQNs, one of them on a node of both, refuse nothing.
+func TestCreateSubsystemSharedNqn(t *testing.T) {
+	const otherName, otherSpId, otherCntlr = "sp-other", uint64(77), uint64(78)
+	const thirdName, thirdSpId, thirdCntlr = "sp-third", uint64(87), uint64(88)
+	for _, tc := range []struct {
+		name     string
+		share    bool
+		otherCn  string
+		otherNqn string
+		// thirdNqn is the NQN a third pool holds; empty, no third pool.
+		thirdNqn string
+		want     codes.Code
+		naming   string
+	}{
+		{"no share_nqn", false, "cn-other:9000", volNqn, "",
+			codes.FailedPrecondition, otherName},
+		{"share_nqn, a node of both pools", true, volCnB, volNqn, "",
+			codes.FailedPrecondition, volCnB},
+		{"share_nqn, other nodes", true, "cn-other:9000", volNqn, "",
+			codes.OK, ""},
+		{"share_nqn, two other pools", true, "cn-other:9000", volNqn, volNqn,
+			codes.FailedPrecondition, thirdName},
+		{"two pools of other NQNs, one on a node of both", false, volCnB,
+			volNqn + "-x", volNqn + "-y", codes.OK, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newVolEnv(t)
+			mustPut(t, env.cli, model.SpConfKey(env.cid, otherName),
+				&pb.SpConf{SpId: otherSpId, NqnList: []string{tc.otherNqn},
+					CntlrIdList: []uint64{otherCntlr}})
+			mustPut(t, env.cli, model.CntlrKey(env.cid, otherSpId, otherCntlr),
+				&pb.Cntlr{AddrPort: tc.otherCn})
+			if tc.thirdNqn != "" {
+				mustPut(t, env.cli, model.SpConfKey(env.cid, thirdName),
+					&pb.SpConf{SpId: thirdSpId, NqnList: []string{tc.thirdNqn},
+						CntlrIdList: []uint64{thirdCntlr}})
+				mustPut(t, env.cli,
+					model.CntlrKey(env.cid, thirdSpId, thirdCntlr),
+					&pb.Cntlr{AddrPort: "cn-third:9000"})
+			}
+			_, err := env.srv.CreateSubsystem(env.ctx,
+				&pb.CreateSubsystemRequest{
+					ClusterName: env.cluster, SpName: volSpName,
+					SpRev: env.token(), Nqn: volNqn, ShareNqn: tc.share,
+				})
+			if status.Code(err) != tc.want ||
+				(tc.naming != "" && !strings.Contains(err.Error(), tc.naming)) {
+				t.Fatalf("CreateSubsystem = %v, want %v naming %q", err,
+					tc.want, tc.naming)
+			}
+			if tc.want != codes.OK {
+				if len(env.spConf().GetNqnList()) != 0 {
+					t.Fatalf("a refused create wrote the subsystem")
+				}
+				return
+			}
+			if env.subsystem(volNqn) == nil {
+				t.Fatalf("the shared subsystem was not written")
+			}
+		})
+	}
+}
+
 // TestCreateSubsystemAdvertisesOnlyListedCntlrs pins the listing rule of
 // architecture.md [D18] on the entry CreateSubsystem writes, the rule that
 // makes the CdcEntry more than a copy of the cntlr list: a cntlr is advertised

@@ -326,7 +326,7 @@ func (s *CnAgentServer) convergeNsDev(
 			if hold && !onDevice(targets, devNo) {
 				outcome = s.heldNsDev(ctx, np, targets)
 			} else {
-				if outcome == nsDevAwaiting {
+				if outcome == nsDevAwaiting && s.mayDarken(ctx, np) {
 					// Rule 5's fallback parks an ns-dev whose namespace the
 					// desired state wants optimized: the namespace goes
 					// inaccessible before the reload, as before every such
@@ -592,7 +592,8 @@ func (s *CnAgentServer) parkNsDev(
 	}
 	parked := len(targets) == 1 && targets[0].Type == "linear" &&
 		len(targets[0].Args) == 2 && targets[0].Args[0] == devNo
-	if np.anaGrpId != common.AnaGrpIdInaccessible && np.wantsServing() {
+	if np.anaGrpId != common.AnaGrpIdInaccessible && np.wantsServing() &&
+		s.mayDarken(ctx, np) {
 		s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
 	}
 	if parked && !dev.Suspended {
@@ -734,6 +735,18 @@ func (s *CnAgentServer) ensureSubsystem(
 	nsErrs map[uint64]error,
 	list listStep,
 ) {
+	if sp.shared != "" {
+		// CN16, A shared NQN: no namespace object step and no port link; a
+		// namespace over its own ns-dev gets its row after the ANA loop, as
+		// any (reportNamespaces).
+		s.reportSharedSubsys(st.tracker, sp, info)
+		for _, np := range sp.namespaces {
+			if np.ownShared {
+				nsErrs[np.nsId] = nil
+			}
+		}
+		return
+	}
 	ssKey := resKeyOf(resKeySubsysFmt, sp.ssId)
 	if list.err != nil {
 		info.SsIdToSubsystem[sp.ssId] = st.tracker.Err(

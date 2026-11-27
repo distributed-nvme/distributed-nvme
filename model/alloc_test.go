@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"slices"
+	"sort"
 	"testing"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
@@ -484,6 +485,66 @@ func TestFindCnCandidates(t *testing.T) {
 		addrsOf(cands), []string{"cn-b:9000", "cn-e:9000"},
 	) {
 		t.Errorf("lists gave %v", addrsOf(cands))
+	}
+}
+
+// TestSharedNqnCnAddrs: the CNs a cntlr of a pool must not land on for a
+// shared NQN are those of every cntlr of every other pool of the cluster
+// that holds a subsystem of an NQN the pool holds (cnagent.md CN16, A
+// shared NQN); a pool that shares none, the pool itself and a pool with no
+// subsystem skip nothing. The gateway's cntlr create and the worker's
+// replacement pass the list as FindCnCandidates' black list, as this test
+// does directly; their own tests cover those two callers.
+func TestSharedNqnCnAddrs(t *testing.T) {
+	cli := newTestClient(t)
+	ctx := context.Background()
+	cid := testCid(t)
+	putPool := func(name string, spId uint64, nqns []string,
+		cntlrs map[uint64]string) {
+		t.Helper()
+		conf := &pb.SpConf{SpId: spId, NqnList: nqns}
+		for cntlrId, addr := range cntlrs {
+			conf.CntlrIdList = append(conf.CntlrIdList, cntlrId)
+			if err := cli.Put(ctx, CntlrKey(cid, spId, cntlrId),
+				&pb.Cntlr{AddrPort: addr}); err != nil {
+				t.Fatalf("put cntlr: %v", err)
+			}
+		}
+		if err := cli.Put(ctx, SpConfKey(cid, name), conf); err != nil {
+			t.Fatalf("put sp conf: %v", err)
+		}
+	}
+	putPool("p-self", 1, []string{"nqn.a", "nqn.b"},
+		map[uint64]string{1: "cn-self:9000"})
+	putPool("p-shares", 2, []string{"nqn.x", "nqn.b"},
+		map[uint64]string{1: "cn-b1:9000", 2: "cn-b2:9000"})
+	putPool("p-other", 3, []string{"nqn.y"},
+		map[uint64]string{1: "cn-o:9000"})
+
+	got, err := SharedNqnCnAddrs(ctx, cli, cid, 1, []string{"nqn.a", "nqn.b"})
+	if err != nil {
+		t.Fatalf("SharedNqnCnAddrs: %v", err)
+	}
+	sort.Strings(got)
+	if want := []string{"cn-b1:9000", "cn-b2:9000"}; !equalStrings(got, want) {
+		t.Fatalf("shared CNs = %v, want %v", got, want)
+	}
+	if got, err := SharedNqnCnAddrs(ctx, cli, cid, 1, nil); err != nil ||
+		len(got) != 0 {
+		t.Fatalf("a pool with no subsystem skips %v (err %v)", got, err)
+	}
+
+	// The list keeps a cntlr pick off those CNs.
+	putCnCap(t, cli, cid, 50, "cn-b1:9000", "r1")
+	putCnCap(t, cli, cid, 40, "cn-free:9000", "r2")
+	cands, err := FindCnCandidates(ctx, cli, cid, 10, 10, got, nil, nil,
+		nil)
+	if err != nil {
+		t.Fatalf("FindCnCandidates: %v", err)
+	}
+	if !equalStrings(addrsOf(cands), []string{"cn-free:9000"}) {
+		t.Fatalf("candidates = %v, want the CN that holds no cntlr of a "+
+			"pool sharing an NQN", addrsOf(cands))
 	}
 }
 

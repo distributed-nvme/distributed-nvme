@@ -388,6 +388,17 @@ const (
 	// read OK without it (architecture.md, Migrations, The forced cancel).
 	// Appended, never renumbered.
 	ResReason_RES_REASON_LEG_PATH_NOT_SOLE ResReason = 13
+	// A host-facing subsystem row of a cntlr whose NQN the stored request of
+	// another cntlr of its node also names (cnagent.md CN16, A shared NQN),
+	// set on both channels, its details naming the other cntlrs' pools:
+	// RES_STATUS_PENDING for the cntlr that built the kernel subsystem, or
+	// that has no namespace under the NQN, and RES_STATUS_ERROR for any
+	// other, whose health epoch then follows as for any error row, so the
+	// worker's cntlr replacement moves it (dnv-worker.md AR7). No health rule
+	// reads the reason; the verdict never names the row, which no re-send
+	// changes; the gateway's status read gives the PENDING row its own text
+	// (gateway.md GW20). Appended, never renumbered.
+	ResReason_RES_REASON_SHARED_NQN ResReason = 14
 )
 
 // Enum value maps for ResReason.
@@ -407,6 +418,7 @@ var (
 		11: "RES_REASON_IDENTITY_UNDECIDED",
 		12: "RES_REASON_POOL_META_DAMAGED",
 		13: "RES_REASON_LEG_PATH_NOT_SOLE",
+		14: "RES_REASON_SHARED_NQN",
 	}
 	ResReason_value = map[string]int32{
 		"RES_REASON_NONE":                0,
@@ -423,6 +435,7 @@ var (
 		"RES_REASON_IDENTITY_UNDECIDED":  11,
 		"RES_REASON_POOL_META_DAMAGED":   12,
 		"RES_REASON_LEG_PATH_NOT_SOLE":   13,
+		"RES_REASON_SHARED_NQN":          14,
 	}
 )
 
@@ -11431,12 +11444,21 @@ func (x *ListThinDevicesReply) GetNameToTd() map[string]*ThinDevice {
 }
 
 type CreateSubsystemRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ClusterName   string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
-	SpName        string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
-	SpRev         *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
-	Nqn           string                 `protobuf:"bytes,4,opt,name=nqn,proto3" json:"nqn,omitempty"`
-	AllowedHosts  []string               `protobuf:"bytes,5,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	ClusterName  string                 `protobuf:"bytes,1,opt,name=cluster_name,json=clusterName,proto3" json:"cluster_name,omitempty"`
+	SpName       string                 `protobuf:"bytes,2,opt,name=sp_name,json=spName,proto3" json:"sp_name,omitempty"`
+	SpRev        *SpRev                 `protobuf:"bytes,3,opt,name=sp_rev,json=spRev,proto3" json:"sp_rev,omitempty"`
+	Nqn          string                 `protobuf:"bytes,4,opt,name=nqn,proto3" json:"nqn,omitempty"`
+	AllowedHosts []string               `protobuf:"bytes,5,rep,name=allowed_hosts,json=allowedHosts,proto3" json:"allowed_hosts,omitempty"`
+	// Take an NQN another storage pool of the cluster holds a subsystem of,
+	// as the destination pool of a move does. Without it the gateway refuses
+	// such an NQN; with it the gateway still refuses while a controller node
+	// holds a cntlr of both pools, as on such a node no cntlr changes the
+	// subsystem and the other pool's cntlr builds nothing of it; an NQN two
+	// other pools hold is refused either way (architecture.md, Subsystems,
+	// namespaces; cnagent.md CN16, A shared NQN). Appended, never
+	// renumbered.
+	ShareNqn      bool `protobuf:"varint,6,opt,name=share_nqn,json=shareNqn,proto3" json:"share_nqn,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -11504,6 +11526,13 @@ func (x *CreateSubsystemRequest) GetAllowedHosts() []string {
 		return x.AllowedHosts
 	}
 	return nil
+}
+
+func (x *CreateSubsystemRequest) GetShareNqn() bool {
+	if x != nil {
+		return x.ShareNqn
+	}
+	return false
 }
 
 type CreateSubsystemReply struct {
@@ -22011,13 +22040,14 @@ const file_pb_schema_proto_rawDesc = "" +
 	"name_to_td\x18\x01 \x03(\v2#.ListThinDevicesReply.NameToTdEntryR\bnameToTd\x1aH\n" +
 	"\rNameToTdEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12!\n" +
-	"\x05value\x18\x02 \x01(\v2\v.ThinDeviceR\x05value:\x028\x01\"\xaa\x01\n" +
+	"\x05value\x18\x02 \x01(\v2\v.ThinDeviceR\x05value:\x028\x01\"\xc7\x01\n" +
 	"\x16CreateSubsystemRequest\x12!\n" +
 	"\fcluster_name\x18\x01 \x01(\tR\vclusterName\x12\x17\n" +
 	"\asp_name\x18\x02 \x01(\tR\x06spName\x12\x1d\n" +
 	"\x06sp_rev\x18\x03 \x01(\v2\x06.SpRevR\x05spRev\x12\x10\n" +
 	"\x03nqn\x18\x04 \x01(\tR\x03nqn\x12#\n" +
-	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\"+\n" +
+	"\rallowed_hosts\x18\x05 \x03(\tR\fallowedHosts\x12\x1b\n" +
+	"\tshare_nqn\x18\x06 \x01(\bR\bshareNqn\"+\n" +
 	"\x14CreateSubsystemReply\x12\x13\n" +
 	"\x05ss_id\x18\x01 \x01(\x04R\x04ssId\"\x85\x01\n" +
 	"\x16DeleteSubsystemRequest\x12!\n" +
@@ -22807,7 +22837,7 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x10RES_STATUS_ERROR\x10\x02\x12\x11\n" +
 	"\rRES_STATUS_OK\x10\x03\x12\x1b\n" +
 	"\x17RES_STATUS_PROVISIONING\x10\x04\x12\x16\n" +
-	"\x12RES_STATUS_PENDING\x10\x05*\xaa\x03\n" +
+	"\x12RES_STATUS_PENDING\x10\x05*\xc5\x03\n" +
 	"\tResReason\x12\x13\n" +
 	"\x0fRES_REASON_NONE\x10\x00\x12\x1b\n" +
 	"\x17RES_REASON_THIN_ID_LOST\x10\x01\x12\x1f\n" +
@@ -22823,7 +22853,8 @@ const file_pb_schema_proto_rawDesc = "" +
 	"\x12!\n" +
 	"\x1dRES_REASON_IDENTITY_UNDECIDED\x10\v\x12 \n" +
 	"\x1cRES_REASON_POOL_META_DAMAGED\x10\f\x12 \n" +
-	"\x1cRES_REASON_LEG_PATH_NOT_SOLE\x10\r*O\n" +
+	"\x1cRES_REASON_LEG_PATH_NOT_SOLE\x10\r\x12\x19\n" +
+	"\x15RES_REASON_SHARED_NQN\x10\x0e*O\n" +
 	"\bRepStage\x12\x15\n" +
 	"\x11REP_STAGE_CREATED\x10\x00\x12\x15\n" +
 	"\x11REP_STAGE_STARTED\x10\x01\x12\x15\n" +

@@ -2423,12 +2423,18 @@ func TestADarkenWhoseListingFailsMovesThePlannedNamespaces(t *testing.T) {
 			syncupBoth(t, srv, target.opts(2, true, strayHost, keptHost))
 			stray := node.connectNvmet(nqn, strayHost)
 			node.connEnds[connDir(nqn, stray)] = connEndsNever
-			// The sweep lists the namespaces first; the second listing is
-			// the move's own.
+			// The sweep lists the namespaces first; for the pool's
+			// subsystem the check for another pool's namespace lists them
+			// next (replaceForeignSubsys); the last listing is the move's
+			// own.
 			key := "list " + agent.NvmetRoot + "/subsystems/" + nqn +
 				"/namespaces"
+			nth := 3
+			if target.isXfer() {
+				nth = 2
+			}
 			node.mu.Lock()
-			node.killCmdNth[key] = 2
+			node.killCmdNth[key] = nth
 			node.mu.Unlock()
 
 			node.Reset()

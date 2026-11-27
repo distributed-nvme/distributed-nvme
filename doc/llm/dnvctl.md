@@ -700,7 +700,9 @@ namespaces as its agent last observed them, not their configuration.
 `ss set-hosts` sends the `--hosts` list as a full replacement of
 `allowed_hosts`, an empty list included, and `ss create` without `--hosts`
 sends an empty list too; what an empty list admits is `architecture.md`,
-Primary cntlr.
+Primary cntlr. `ss create --share-nqn` sets `share_nqn`, which a move's
+destination pool needs for an NQN the source pool holds (`architecture.md`,
+Subsystems, namespaces).
 
 ### `ns` — `ctl/ns.go`
 

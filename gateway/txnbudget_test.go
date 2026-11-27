@@ -845,6 +845,29 @@ func TestCreateTransferTxnBudget(t *testing.T) {
 	}.check(t)
 }
 
+// TestCreateSubsystemTxnBudget is CreateSubsystem's tripwire: its STM reads
+// the pool's cntlrs for the CdcEntry, and for a shared NQN the one other pool
+// that holds it and that pool's cntlrs (sharedNqnCheck). The names of the
+// pools that hold the NQN come from a range before the STM, which refuses a
+// second one, so the STM reads one other pool at most whatever the pool count.
+func TestCreateSubsystemTxnBudget(t *testing.T) {
+	txnShape{
+		name: "CreateSubsystem",
+		stm:  "subsystem.go's CreateSubsystem and sharedNqnCheck",
+		// ClusterConf, SpConf, SpRev, the new Subsystem key (absent, which
+		// still costs a compare) and the other pool's SpConf.
+		fixedReads: 5,
+		// The Subsystem, CdcEntry, SpConf and SpRev puts.
+		fixedWrites: 4,
+		terms: []txnTerm{
+			{"cntlr", 1, common.MaxCntlrCntPerSp, 4},
+			{"other pool's cntlr", 1, common.MaxCntlrCntPerSp, 4},
+		},
+		maxCompares: 17,
+		overDefault: false,
+	}.check(t)
+}
+
 // TestUpdateCntlidSlotListTxnBudget is UpdateStoragePoolCntlidSlotList's
 // tripwire: a slot may leave the list only when no cntlr and no side uses
 // it, so its STM reads every cntlr, every slice and every clone of the pool,

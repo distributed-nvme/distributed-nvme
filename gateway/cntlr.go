@@ -89,6 +89,10 @@ type cntlrPlan struct {
 	ExtCnt    uint64
 	SpCnAddrs []string
 	SpCnLocs  []string
+	// SharedCnAddrs are the CNs of the cntlrs of every other pool that holds
+	// a subsystem of an NQN this pool holds (model.SharedNqnCnAddrs;
+	// cnagent.md CN16, A shared NQN), which the scan black-lists.
+	SharedCnAddrs []string
 }
 
 // planCreateCntlr is CreateCntlr's planning read (gateway.md, Cntlrs and
@@ -128,6 +132,8 @@ func planCreateCntlr(
 	req *pb.CreateCntlrRequest,
 ) (cntlrPlan, error) {
 	var plan cntlrPlan
+	var spId uint64
+	var nqns []string
 	err := cli.Snapshot(ctx, func(stm etcdutil.STM) error {
 		plan = cntlrPlan{}
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
@@ -159,11 +165,19 @@ func planCreateCntlr(
 			ExtCnt:    spFootprint(slices),
 			SpCnAddrs: addrs,
 		}
+		spId, nqns = sc.SpId(), sc.Conf.GetNqnList()
 		return nil
 	})
 	if err != nil {
 		return cntlrPlan{}, mapStmErr(err)
 	}
+	// Read after the snapshot, as the locations are: a subsystem committed
+	// in another pool since is met by the cn agent's own refusal (CN16).
+	shared, err := model.SharedNqnCnAddrs(ctx, cli, plan.Cid, spId, nqns)
+	if err != nil {
+		return cntlrPlan{}, errAborted("%v", err)
+	}
+	plan.SharedCnAddrs = shared
 	locs, err := cnLocations(ctx, cli, plan.Cid, plan.SpCnAddrs)
 	if err != nil {
 		return cntlrPlan{}, err
@@ -236,8 +250,8 @@ func (s *Server) CreateCntlr(
 		}
 		cand, err := pickCn(
 			ctx, s.cli, plan.Cid, plan.Cc, plan.ExtCnt,
-			req.GetCnSelector(), nil, plan.SpCnAddrs, plan.SpCnLocs,
-			opCreateCntlr)
+			req.GetCnSelector(), plan.SharedCnAddrs, plan.SpCnAddrs,
+			plan.SpCnLocs, opCreateCntlr)
 		if err != nil {
 			return err
 		}

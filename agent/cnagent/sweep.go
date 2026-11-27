@@ -344,8 +344,9 @@ func legWrapperSp(clusterId, cnId uint64, name string) (uint64, bool) {
 // makes it that cntlr's sp's, and unclaimed it is never touched — it may be a
 // newer build's subsystem over a wanted ns-dev after a rollback, and the
 // answer of any read could only be used to remove it. A HOST-FACING NQN is
-// chosen by the user and carries nothing. A claim settles it first; then what
-// its namespaces point at: a namespace whose device_path is a kind-c6 ns-dev
+// chosen by the user and carries nothing. One two held requests name is no
+// pool's (cnagent.md CN16, A shared NQN). A claim settles it next; then
+// what its namespaces point at: a namespace whose device_path is a kind-c6 ns-dev
 // of ours makes the subsystem that sp's. dnv exports a host namespace only
 // over an ns-dev, so a namespace over any other device, another cn's ns-dev
 // included, makes the subsystem foreign.
@@ -386,6 +387,13 @@ func (s *CnAgentServer) nvmetOwner(
 		if parts.Kind == common.NqnKindXfer && parts.Ids[0] == clusterId {
 			return parts.Ids[1], true, false
 		}
+		return 0, false, false
+	}
+	// An NQN the stored requests of two cntlrs name is no pool's (CN16, A
+	// shared NQN): no chain takes it, its hosts or its links, so no cntlr
+	// removes another pool's namespaces; buildChain takes a namespace under
+	// it only over an ns-dev of its own pool that it removes (sharedOwnNs).
+	if s.nqnShared(nqn) {
 		return 0, false, false
 	}
 	// An NQN a stored cntlr still names settles it before anything is read,
@@ -839,9 +847,31 @@ func (s *CnAgentServer) buildChain(
 		}
 	}
 
+	var unwantedNsDevs map[string]bool
 	for _, nqn := range actual.nvmetSubsys {
 		attr := actual.nvmetOwner[nqn]
-		if !attr.ours || attr.unowned || attr.spId != spId {
+		thisSp := attr.ours && !attr.unowned && attr.spId == spId
+		otherSp := attr.ours && !attr.unowned && attr.spId != spId ||
+			!attr.ours && s.nqnShared(nqn)
+		if !thisSp && otherSp && len(chain.nsDevs) > 0 &&
+			!common.IsDnvNqn(nqn) {
+			// A host-facing subsystem that is shared, or another pool's of
+			// this node, can still hold a namespace a cntlr of this pool
+			// built over its ns-dev while the NQN was shared: one over an
+			// ns-dev the chain removes goes first, inaccessible first, so
+			// no park leaves it over dm-error and L2 can remove the ns-dev
+			// (CN16, A shared NQN).
+			if unwantedNsDevs == nil {
+				unwantedNsDevs = make(map[string]bool, len(chain.nsDevs))
+				for _, name := range chain.nsDevs {
+					unwantedNsDevs[name] = true
+				}
+			}
+			chain.nvmetNs = append(chain.nvmetNs,
+				s.sharedOwnNs(ctx, nqn, unwantedNsDevs, res)...)
+			continue
+		}
+		if !thisSp {
 			continue
 		}
 		if _, keep := wanted.nvmetSs[nqn]; !keep {
@@ -2788,12 +2818,22 @@ func cntlrRowVerdict(
 	}
 	for _, ssp := range plan.subsystems {
 		subsys := info.GetSsIdToSubsystem()[ssp.ssId]
-		if onRead || !cutErrorRow(subsys) {
+		// CN16, A shared NQN: a re-send cannot change the subsystem, so its
+		// row names nothing, as the read's missing port does not; a
+		// namespace row under it is one over this cntlr's own ns-dev, whose
+		// ANA group a re-send moves, so it is named on its ns-dev alone; its
+		// ns-devs are this cntlr's own and are named as any.
+		shared := ssp.shared != ""
+		if !shared && (onRead || !cutErrorRow(subsys)) {
 			name(subsys)
 		}
 		for _, np := range ssp.namespaces {
 			nsDev := info.GetNsIdToDmLinear()[np.nsId]
 			name(nsDev, nsDevUnder(np, info))
+			if shared {
+				name(info.GetNsIdToNamespace()[np.nsId], nsDev)
+				continue
+			}
 			name(info.GetNsIdToNamespace()[np.nsId], nsDev, subsys)
 		}
 	}
@@ -3052,7 +3092,7 @@ func (s *CnAgentServer) cntlrAnaPreStep(ctx context.Context, plan *cntlrPlan) {
 	// A provisioning-deferred namespace is already inaccessible by CN16's
 	// fourth conjunct, so this covers a fresh SP's first converge too.
 	for _, np := range plan.namespaces {
-		if np.anaGrpId == common.AnaGrpIdInaccessible {
+		if np.anaGrpId == common.AnaGrpIdInaccessible && s.mayDarken(ctx, np) {
 			s.setAnaLogged(ctx, np.ss.nqn, np.nsIdx)
 		}
 	}

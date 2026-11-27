@@ -603,6 +603,17 @@ enum ResReason {
     // read OK without it (architecture.md, Migrations, The forced cancel).
     // Appended, never renumbered.
     RES_REASON_LEG_PATH_NOT_SOLE = 13;
+    // A host-facing subsystem row of a cntlr whose NQN the stored request of
+    // another cntlr of its node also names (cnagent.md CN16, A shared NQN),
+    // set on both channels, its details naming the other cntlrs' pools:
+    // RES_STATUS_PENDING for the cntlr that built the kernel subsystem, or
+    // that has no namespace under the NQN, and RES_STATUS_ERROR for any
+    // other, whose health epoch then follows as for any error row, so the
+    // worker's cntlr replacement moves it (dnv-worker.md AR7). No health rule
+    // reads the reason; the verdict never names the row, which no re-send
+    // changes; the gateway's status read gives the PENDING row its own text
+    // (gateway.md GW20). Appended, never renumbered.
+    RES_REASON_SHARED_NQN = 14;
 }
 
 message ResInfo {
@@ -2041,6 +2052,15 @@ message CreateSubsystemRequest {
     SpRev sp_rev = 3;
     string nqn = 4;
     repeated string allowed_hosts = 5;
+    // Take an NQN another storage pool of the cluster holds a subsystem of,
+    // as the destination pool of a move does. Without it the gateway refuses
+    // such an NQN; with it the gateway still refuses while a controller node
+    // holds a cntlr of both pools, as on such a node no cntlr changes the
+    // subsystem and the other pool's cntlr builds nothing of it; an NQN two
+    // other pools hold is refused either way (architecture.md, Subsystems,
+    // namespaces; cnagent.md CN16, A shared NQN). Appended, never
+    // renumbered.
+    bool share_nqn = 6;
 }
 
 message CreateSubsystemReply {

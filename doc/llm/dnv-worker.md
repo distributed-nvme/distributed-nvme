@@ -4647,8 +4647,11 @@ left stack, `cnagent.md` CN35):
 the candidates are
 `FindCnCandidatesAntiAffine` with the SP footprint (the sum of `ext_cnt` over
 all groups of its slices), a candidate count of `cn_batch_size`, a black list
-of the old cntlr's `addr_port`, the SP's other cntlrs' endpoints as the SP's
-CN endpoints and those CNs' locations excluded — the locations out of the
+of the old cntlr's `addr_port` and of the CNs of the cntlrs of every other
+pool of the cluster that holds a subsystem of an NQN the pool holds
+(`sharedNqnCnAddrs`, `model.SharedNqnCnAddrs`; `architecture.md`, Finding
+CN candidates; `cnagent.md` CN16, A shared NQN), the SP's other cntlrs'
+endpoints as the SP's CN endpoints and those CNs' locations excluded — the locations out of the
 node records the pass reads at the revision of its load (AR1, MD3; a CN
 missing from them contributes none), the old
 cntlr adding none of its own because it is the one leaving, so its domain is

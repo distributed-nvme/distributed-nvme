@@ -265,29 +265,34 @@ dnvctl always sends a piece's position.
   accepted. The operator asks for it. Procedure written:
   [the forced-start guide](operations.md#the-forced-start-guide) says which
   leg to choose and what an older copy costs.
-- **Two pools with a subsystem of the same NQN can serve each other's
-  volumes.** The gateway keeps a subsystem's NQN unique inside one pool
-  only, and the move of a volume to another pool asks for the same NQN in
-  both pools. A controller node's kernel has one subsystem for each NQN,
-  and nothing keeps a cntlr of each pool off one controller node: a pool
-  create, a cntlr an operator creates and the worker's cntlr replacement
-  can each put them there. Each cntlr then writes its own values into the
-  one kernel subsystem: its serial number, its list of hosts and the
-  device under each namespace. A subsystem's serial number comes from its
-  id in its pool, and every pool counts its ids from the same start, so two
-  pools can give a subsystem the same serial number, as two pools of one
-  shape do with nothing else made first; the two pools of a move usually
-  differ. With the same serial number every write of the second cntlr goes
-  through: a host connected under the first pool's list keeps its
-  connection, where the controller node ends no connections, and reads and
-  writes the second pool's volume, with no error when both pools give the
-  namespace the same identity, as a move does. With different serial
-  numbers, once a host has read the subsystem, the kernel refuses the
-  second cntlr's serial number, and neither pool serves steadily on that
-  node. State: fix decided. Until then, keep the cntlrs of two such pools
-  on different controller nodes: [the operations
-  doc](operations.md#move-a-volume-to-another-pool) checks it before a move
-  and during the copy. Read from dnv's code; not seen in the lab.
+- **A controller node that holds a cntlr of two pools that share a
+  subsystem name changes that subsystem for neither pool.** A controller
+  node's kernel holds one subsystem for each NQN, and the move of a volume
+  to another pool asks for the same NQN in both pools. So a cntlr writes
+  nothing under a subsystem whose NQN a cntlr of another pool on its node
+  also names, but the ANA group of a namespace over its own volume. The
+  cntlr that built the subsystem keeps it as it was built: its hosts keep
+  their paths, its namespaces still move to ANA optimized or inaccessible
+  as its role asks, and its subsystem row reads pending. A host added to
+  its list and a new namespace do not reach the node; a host taken off
+  its list is not cut, so while that host is still allowed the
+  namespaces go to ANA inaccessible; a namespace it deletes is taken out.
+  The other cntlr builds nothing, and its subsystem row reads an error
+  that names the other pool, so the worker replaces it once it has been
+  unhealthy for `cntlr_unhealthy`; a cntlr with no namespace under the
+  name reads pending and is not moved for it. The gateway refuses a
+  second subsystem of an NQN in a cluster unless asked for it, a third
+  one in any case, and the second while a controller node holds a cntlr
+  of both pools, and the cntlr picks keep such cntlrs apart, so the case
+  comes from a placement made before or alongside those checks, or from
+  two subsystem creates of one name in two pools at the same moment,
+  which the gateway does not see. Until a cntlr moves, the hosts of the
+  pool that did not build the subsystem have no path through that node.
+  When the cntlr that built it leaves first, its namespaces go to ANA
+  inaccessible and are taken out, and the other builds its own. State:
+  accepted. Procedure written: [the operations
+  doc](operations.md#move-a-volume-to-another-pool), step 13, moves one
+  of the cntlrs. Seen in the lab's cn agent suite (case `sharednqn`).
 
 ## 4. Data loss dnv accepts
 

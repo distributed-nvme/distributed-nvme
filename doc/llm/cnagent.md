@@ -4068,6 +4068,68 @@ there would never end. A stack that never builds keeps its namespaces
 inaccessible with no time limit; an operator ends the wait by disabling the
 cntlr, by a level step or by a delete.
 
+**A shared NQN.** The kernel holds one nvmet subsystem per NQN, and two
+pools can hold a subsystem of one NQN, as the two pools of a move do
+(`architecture.md`, Subsystems, namespaces). A host-facing NQN that the
+stored request of another cntlr of this agent also names is shared
+(`markShared`), on the converge, on the read, and on the standby plan of
+an earlier term's sweep (CN35). For a shared NQN a cntlr changes nothing
+under the kernel subsystem but the ANA group of a namespace over its own
+ns-dev: no list step, so no serial, model, cntlid bounds, host links or
+cut (CN33); no namespace object and no port link. A namespace whose
+"device_path" is this cntlr's own ns-dev, read in the pass
+(`markOwnShared`), is its own: it moves as any namespace of the cntlr, by
+P1, before a park, by the fence watch (`mayDarken`, `ownsFenceNs`; CN34)
+and by the build's ANA loop, to optimized too, and gets its row as any
+namespace. A namespace over another pool's device never moves, gets no
+row, and the fence watch counts it as none of its cntlr's. The subsystem
+is safe in the pass only while the kernel admits no host off its desired
+list (`admitsOnlyDesired`, CN33): a host taken off the list is not cut
+while the NQN is shared, so while it is admitted every namespace of its
+own moves inaccessible at once (`darkenOwnShared`). Its ns-devs are its
+own and are built as any. The cntlr with a namespace of its own under the
+kernel subsystem built it and keeps it as built: a host added to its list,
+a new namespace and a serial wait until the NQN is no longer shared,
+while a namespace it drops is taken out by its sweep (below), and its
+hosts keep their paths. Rows (`reportSharedSubsys`), alike on both
+channels, with `RES_REASON_SHARED_NQN` and naming the other cntlrs'
+pools: the builder's subsystem row, and that of a cntlr with no namespace
+under the NQN, read `RES_STATUS_PENDING`; any other cntlr's reads
+`RES_STATUS_ERROR`. The verdict (CN30) names the rows of its own
+namespaces, on their ns-devs' rows alone, whose ANA group a re-send
+moves, and never the subsystem row, which no re-send can change, as it
+cannot make the read's missing port. The sweep attributes a shared NQN to
+no pool (`nvmetOwner`; CN21), so no cntlr removes or changes the
+subsystem, its links or its hosts, or another pool's namespaces; under a
+host-facing subsystem that is shared, or that another pool of the node
+holds, a pool's sweep removes, inaccessible first and before its park,
+each namespace over an ns-dev of its own pool that its chain removes
+(`sharedOwnNs`), so that no park leaves it over dm-error and L2 can remove
+the ns-dev. Once a single cntlr names the NQN it builds the subsystem
+again; when a namespace under the kernel subsystem still stands over an
+ns-dev of another pool of this node — the builder's request went with no
+sweep after it, as across a restart — its converge first moves every
+namespace of it inaccessible and removes the subsystem, then builds its
+own (`replaceForeignSubsys`); a namespace that does not read back
+inaccessible, or a removal that fails, is the subsystem row's error, and
+the subsystem stays and is not safe in the pass; a read reads such a
+subsystem `RES_STATUS_ERROR` naming the other pool's ns-dev
+(`foreignNs`). Reason: the rule is the same for every cntlr, so none takes
+over the subsystem another built, whichever came first, and a host of one
+pool never reaches the other pool's volume; a request is stored before
+its converge acts, so of two cntlrs that come at once at least one sees
+the other's, and at most one builds; the ANA moves of its own namespaces
+keep a demoted builder from serving on and let a promoted one serve; the
+pending row sets no health epoch, so the builder's hosts keep their
+paths, and the other's error row sets the cntlr's health epoch, so the
+worker's cntlr replacement moves it off the node (`dnv-worker.md` AR7),
+and the gateway and the cntlr picks keep such cntlrs apart
+(`architecture.md`, Finding CN candidates), while a cntlr with no
+namespace under the NQN loses nothing and is not moved for it; the other
+pool's serial, hosts and namespaces are not the new builder's, and the
+kernel refuses a new serial once a host has discovered the subsystem, so
+the subsystem is built anew rather than changed.
+
 CN17. Transfers (`xfer.go`; both roles; `architecture.md`, Transfers).
 Per `xfer_list` entry: resolve the origin namespace by `ori_nqn` and
 `ori_ns_idx` in `nqn_to_subsystem` (unresolvable ⇒ the transfer's
@@ -5258,14 +5320,19 @@ than falling through to the rule below — it may be a newer build's subsystem
 over a wanted ns-dev after a rollback. Only a name that decodes as neither —
 no dnv prefix at all — reaches that rule. A host-facing nvmet subsystem
 carries a user-chosen NQN and therefore carries no ids at all, so it is
-attributed in two steps, the request first for the reason `architecture.md`,
-Teardown by sweep, gives. First, a cntlr this process holds whose
+attributed in three steps, the requests first for the reason
+`architecture.md`, Teardown by sweep, gives. First, an NQN that the stored
+requests of two cntlrs or more name is no pool's (CN16, A shared NQN): no
+chain takes the subsystem, its hosts or its links, and a chain takes a
+namespace under it only when its device is an ns-dev of the chain's own
+pool that the chain removes (`sharedOwnNs`), as it does under a
+host-facing subsystem another pool of the node holds. Second, a cntlr this process holds whose
 `nqn_to_subsystem` still names it settles it, under that cntlr's sp, with
 nothing read from configfs: a cntlr's request is in memory (`putCntlr`)
 before its converge builds anything, so no subsystem a converge of this
 process builds can exist whose claim is not already visible here. The
 guarantee is about this process's state, not about the files: the claim of a
-cntlr whose file CN2 skipped is in that file alone (CN2). Second, for a
+cntlr whose file CN2 skipped is in that file alone (CN2). Third, for a
 subsystem no held request claims, its namespaces, in the listing's order:
 the first with a "device_path" decides for the whole subsystem (the kernel
 reads one never written as "(null)", which names nothing, as an empty one
@@ -6538,7 +6605,9 @@ the CN9 gate, not by a failed command; and `RES_STATUS_PENDING` is produced
 by the CN11 registry, by the cut after its wait, after a write the kernel
 refused or after a failed read of a written connection's "state", and by
 a read whose listing shows a stray, each while a stray connection is
-still listed and the lockdown file shows no mode in force (CN33). The
+still listed and the lockdown file shows no mode in force (CN33), and by
+`reportSharedSubsys` for a subsystem of a shared NQN on the cntlr that
+built it or that has no namespace under it (CN16, A shared NQN). The
 cut's refused write, its failed
 "state" read and a read of the lockdown file that does not answer are
 failed commands whose row reads `RES_STATUS_PENDING`, with the stray's text and not the command's output,
@@ -6659,7 +6728,8 @@ pool row that reads needs_check, failed or damaged metadata
 (`RES_REASON_POOL_NEEDS_CHECK`, `RES_REASON_POOL_FAILED`,
 `RES_REASON_POOL_META_DAMAGED`, CN13), no subsystem whose link fails because the
 node's port is not there ("the port is not there", which the CN's verdict
-names), no concat the agent refuses to shrink, and no row of a transfer
+names), no subsystem of a shared NQN (CN16, A shared NQN), no concat the
+agent refuses to shrink, and no row of a transfer
 whose origin the request no longer names: no converge of the cntlr cures
 those, save a new volume refused because its header read failed: a later
 converge reads the headers again and can then build it (CN14), and a read

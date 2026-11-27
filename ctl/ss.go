@@ -54,6 +54,7 @@ func ssCreateCmd() *cobra.Command {
 				SpRev:        rev,
 				Nqn:          strOf("nqn"),
 				AllowedHosts: strListOf("hosts"),
+				ShareNqn:     boolOf("share-nqn"),
 			}
 			return func(
 				ctx context.Context,
@@ -66,6 +67,9 @@ func ssCreateCmd() *cobra.Command {
 	flags.String("nqn", "", "subsystem nqn")
 	flags.String("hosts", "",
 		"allowed_hosts: comma-separated host nqns; empty grants none")
+	flags.Bool("share-nqn", false,
+		"share_nqn — take an nqn another pool of the cluster holds, as "+
+			"the destination of a move")
 	return cmd
 }
 

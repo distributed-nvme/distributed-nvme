@@ -308,7 +308,7 @@ var leafFlags = map[string][]string{
 	"td list":   {},
 	"td get-bm": {"name", "slice-idx", "start", "cnt"},
 	// ss
-	"ss create":    {"nqn", "hosts"},
+	"ss create":    {"nqn", "hosts", "share-nqn"},
 	"ss delete":    {"nqn"},
 	"ss list":      {},
 	"ss set-hosts": {"nqn", "hosts"},

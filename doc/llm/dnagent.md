@@ -743,7 +743,9 @@ primary's leg rows (`cnagent.md` CN11) and on a subsystem row with a stray
 connection still listed while the lockdown file shows no mode in force,
 after the cut's wait, after a write the kernel refused, after a failed read
 of a written connection's "state", or at a read whose listing shows it
-(`cnagent.md` CN33), and the dn agent on the primary's dm-linear whose path
+(`cnagent.md` CN33), and on the subsystem row of a shared NQN on the cntlr
+that built it or that has no namespace under it (`cnagent.md` CN16, A
+shared NQN), and the dn agent on the primary's dm-linear whose path
 waits for the fence (DN10) and on a migration source's export whose link
 waits for the fence (DN12), and never `RES_STATUS_UNKNOWN` (worker-only).
 `RES_STATUS_PENDING` means *waiting on something else before it can be

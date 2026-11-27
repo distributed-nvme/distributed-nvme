@@ -2162,9 +2162,17 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 			switch {
 			case t.key == "leg":
 				listed = legRowListed(row)
+			case subsystemRowPending(t.key, row) &&
+				row.GetReason() == pb.ResReason_RES_REASON_SHARED_NQN:
+				// A subsystem whose NQN another pool's cntlr on the node
+				// names, on the cntlr that built it or that has no
+				// namespace under it (cnagent.md CN16, A shared NQN): a
+				// line for the operator, though no health epoch follows.
+				listed = true
+				text = msgSharedNqnPending + ": " + text
 			case subsystemRowPending(t.key, row):
-				// A subsystem's row reads PENDING only while a host taken
-				// off its list keeps its connection (exportRow
+				// Any other PENDING subsystem row: a host taken off its
+				// list keeps its connection (exportRow
 				// (agent/cnagent/nvmetconn.go)), and while it does the
 				// cntlr's converges move the subsystem's namespaces to ANA
 				// inaccessible: a line for the operator, though no health
@@ -2218,6 +2226,13 @@ func (b *statusBuilder) errorRows(info *pb.CntlrInfo) {
 const msgHostCutPending = "a host taken off the list keeps its connection; " +
 	"while it does, the cntlr's converges move the subsystem's namespaces " +
 	"to ANA inaccessible, away from every host"
+
+// msgSharedNqnPending opens the text of a subsystem row that reads
+// RES_STATUS_PENDING with RES_REASON_SHARED_NQN, the row's own text after
+// it (cnagent.md CN16, A shared NQN).
+const msgSharedNqnPending = "a cntlr of another pool on this controller " +
+	"node names the same subsystem; no cntlr of the node changes it until " +
+	"one of them moves"
 
 // subsystemRowPending says that row, of the table key names, is a subsystem
 // row or a transfer's subsystem row that reads RES_STATUS_PENDING.

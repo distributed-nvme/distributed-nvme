@@ -393,6 +393,16 @@ type reactionOps interface {
 		spCnAddrs []string,
 		excludeLocs []string,
 	) ([]model.Cand, error)
+	// sharedNqnCnAddrs lists the CNs of the cntlrs of every other pool of
+	// the cluster that holds a subsystem of an NQN in nqnList, which AR7's
+	// scan black-lists (model.SharedNqnCnAddrs; cnagent.md CN16, A shared
+	// NQN).
+	sharedNqnCnAddrs(
+		ctx context.Context,
+		cid uint64,
+		spId uint64,
+		nqnList []string,
+	) ([]string, error)
 	// failover is AR5; passed are the standbys its election passes over,
 	// whose agents refuse their own SyncupCntlr (HL9).
 	failover(
@@ -785,6 +795,15 @@ func (o *modelReactionOps) findCnCandidates(
 		black, nil, spCnAddrs, excludeLocs,
 	)
 	return cands, err
+}
+
+func (o *modelReactionOps) sharedNqnCnAddrs(
+	ctx context.Context,
+	cid uint64,
+	spId uint64,
+	nqnList []string,
+) ([]string, error) {
+	return model.SharedNqnCnAddrs(ctx, o.cli, cid, spId, nqnList)
 }
 
 func (o *modelReactionOps) failover(
@@ -3058,9 +3077,19 @@ func (w *spWorker) tryReplaceCntlr(ctx context.Context, p *spPass) bool {
 	if !w.passNodes(ctx, p, reactionReplaceCntlr, ids...) {
 		return true
 	}
+	// The CNs of the pools that share an NQN with this one are black-listed
+	// too (architecture.md, Finding CN candidates; cnagent.md CN16, A shared
+	// NQN): on such a CN no cntlr changes the shared subsystem, and the
+	// pool whose cntlr did not build it is not served there.
+	shared, err := w.reactor().ops.sharedNqnCnAddrs(
+		ctx, w.cid, w.spId, p.state.Conf.GetNqnList())
+	if err != nil {
+		w.reactionFailed(ctx, reactionReplaceCntlr, err, ids...)
+		return true
+	}
 	cands, err := w.reactor().ops.findCnCandidates(
 		ctx, w.cid, footprint, batch,
-		[]string{old.GetAddrPort()}, spCnAddrs,
+		append([]string{old.GetAddrPort()}, shared...), spCnAddrs,
 		otherCntlrLocations(p, oldId),
 	)
 	if err != nil {

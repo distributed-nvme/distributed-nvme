@@ -341,13 +341,14 @@ var sweepRows = []sweepRow{
 	// ---- ss ----
 	{36, "CreateSubsystem",
 		[]string{"ss", "create", "--nqn", itNqn, "--hosts", itHostNqn,
-			"--rev", "7"},
+			"--share-nqn", "--rev", "7"},
 		&pb.CreateSubsystemRequest{
 			ClusterName:  itCluster,
 			SpName:       itSp,
 			SpRev:        wantSpRev(itRevValue),
 			Nqn:          itNqn,
 			AllowedHosts: []string{itHostNqn},
+			ShareNqn:     true,
 		}},
 	{37, "DeleteSubsystem",
 		[]string{"ss", "delete", "--nqn", itNqn, "--rev", "7"},

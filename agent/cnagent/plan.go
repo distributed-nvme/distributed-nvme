@@ -604,6 +604,13 @@ type ssPlan struct {
 	// Nothing sets it but those two, so a pass that decides nothing keeps the
 	// subsystem dark.
 	safe bool
+	// shared is the details of the subsystem's row while its NQN is shared:
+	// the stored request of another cntlr of this agent names it too
+	// (CnAgentServer.markShared; cnagent.md CN16, A shared NQN). Empty
+	// otherwise. While it is set the pass writes nothing under the kernel
+	// subsystem but the ANA moves of a namespace whose device is this cntlr's
+	// own ns-dev (mayDarken, nsPlan.ownShared).
+	shared string
 }
 
 type nsPlan struct {
@@ -640,6 +647,12 @@ type nsPlan struct {
 	// rules select, so no data is put under a namespace that may still be
 	// optimized (convergeNsDev, CN33).
 	undarkened bool
+	// ownShared says the namespace's NQN is shared (ssPlan.shared) and the
+	// kernel namespace of its index stands over this namespace's own ns-dev,
+	// read in this pass (markOwnShared; cnagent.md CN16, A shared NQN): the
+	// cntlr built it, and the pass moves its ANA group and writes its row as
+	// for any namespace, but steps no namespace object.
+	ownShared bool
 	// deferred mirrors td.deferred, or, below SP_LEVEL_NO_CLONE (levelClone),
 	// the deferral of a clone whose destination is the td: the fourth
 	// conjunct of the CN16 ANA rule ([D15]). The ns-dev and the nvmet

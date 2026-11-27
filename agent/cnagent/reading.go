@@ -134,6 +134,7 @@ func (s *CnAgentServer) readCntlr(
 	}
 	plan := newCntlrPlan(s.nf, req, thinChecking(st))
 	applyFence(plan, st)
+	s.markShared(plan)
 	rd := s.takeReading(ctx)
 	plan.rd, plan.walk, plan.mdWalks = rd, rd.walk, rd.mdWalks()
 	info, putBack, noCtrl := s.probeCntlr(ctx, st, plan)

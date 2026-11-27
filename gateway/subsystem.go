@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"fmt"
+	"strings"
 
 	"github.com/distributed-nvme/distributed-nvme/common"
 	"github.com/distributed-nvme/distributed-nvme/etcdutil"
@@ -113,6 +114,107 @@ func newDevNguid() (string, error) {
 	return fmt.Sprintf("%x", raw[:]), nil
 }
 
+// sharingPoolNames are the names of the storage pools of the cluster but
+// spName whose nqn_list holds nqn, read in one range of the cluster's pool
+// records, with their values, outside any transaction, so that
+// CreateSubsystem's transaction reads only those pools again
+// (sharedNqnCheck) and its reads do not grow with the pool count, which the
+// transaction budget bounds (architecture.md, Common validation). A pool
+// that takes the NQN after the range is met by the cn agent's own refusal
+// (cnagent.md CN16, A shared NQN).
+func (s *Server) sharingPoolNames(
+	ctx context.Context,
+	clusterName string,
+	spName string,
+	nqn string,
+) ([]string, error) {
+	var cid uint64
+	err := s.cli.Snapshot(ctx, func(stm etcdutil.STM) error {
+		resolved, _, err := resolveCluster(stm, clusterName)
+		cid = resolved
+		return err
+	})
+	if err != nil {
+		return nil, mapStmErr(err)
+	}
+	prefix := model.SpConfPrefix(cid)
+	kvs, _, err := s.cli.Range(ctx, prefix)
+	if err != nil {
+		return nil, errAborted("%v", err)
+	}
+	var names []string
+	for _, kv := range kvs {
+		name := strings.TrimPrefix(kv.Key, prefix)
+		if name == spName {
+			continue
+		}
+		conf := &pb.SpConf{}
+		if err := s.cli.Decode(ctx, kv, conf); err != nil {
+			return nil, errAborted("%v", err)
+		}
+		if containsName(conf.GetNqnList(), nqn) {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// sharedNqnCheck is CreateSubsystem's check of a shared NQN
+// (architecture.md, Subsystems, namespaces): an NQN another pool of the
+// cluster holds a subsystem of is refused FAILED_PRECONDITION, naming that
+// pool, unless the request sets share_nqn, as the destination pool of a
+// move does; with it, a controller node that holds a cntlr of both pools is
+// refused, naming the node, as the kernel holds one subsystem per NQN, no
+// cntlr of such a node changes it, and the pool whose cntlr did not build
+// it is not served there (cnagent.md CN16, A shared NQN). others are the
+// pools the range found holding the NQN (sharingPoolNames), at most one, as
+// the caller refuses more; its record is read again in the caller's
+// transaction, and a pool deleted since, or that let the NQN go, is skipped.
+// A pool that takes the NQN after the range is not seen: two creates of one
+// NQN in two pools at once can both commit, and the cn agent's rule is then
+// what keeps either pool's volume from the other's hosts.
+func sharedNqnCheck(
+	stm etcdutil.STM,
+	cid uint64,
+	spName string,
+	own []*pb.Cntlr,
+	others []string,
+	nqn string,
+	share bool,
+) error {
+	ownCns := make(map[string]bool, len(own))
+	for _, cntlr := range own {
+		ownCns[cntlr.GetAddrPort()] = true
+	}
+	for _, name := range others {
+		conf := &pb.SpConf{}
+		if !stm.Get(model.SpConfKey(cid, name), conf) ||
+			!containsName(conf.GetNqnList(), nqn) {
+			continue
+		}
+		if !share {
+			return errPrecondition("subsystem %q is a subsystem of storage "+
+				"pool %q too; set share_nqn to make the pair of a move",
+				nqn, name)
+		}
+		theirs, err := loadCntlrs(stm, cid, conf)
+		if err != nil {
+			return err
+		}
+		for _, cntlr := range theirs {
+			if ownCns[cntlr.GetAddrPort()] {
+				return errPrecondition("controller node %s holds a cntlr "+
+					"of storage pool %q and of storage pool %q, which "+
+					"would share subsystem %q, and on such a node no "+
+					"cntlr changes it and one pool is not served; move "+
+					"one of the cntlrs first",
+					cntlr.GetAddrPort(), spName, name, nqn)
+			}
+		}
+	}
+	return nil
+}
+
 // CreateSubsystem is the CreateSubsystem of architecture.md, Subsystems,
 // namespaces.
 //
@@ -151,8 +253,20 @@ func (s *Server) CreateSubsystem(
 	); err != nil {
 		return nil, err
 	}
+	others, err := s.sharingPoolNames(ctx, req.GetClusterName(),
+		req.GetSpName(), req.GetNqn())
+	if err != nil {
+		return nil, err
+	}
+	// At most two pools hold one NQN, the pair of a move, so the STM reads
+	// one other pool and its cntlrs at most (TestCreateSubsystemTxnBudget).
+	if len(others) > 1 {
+		return nil, errPrecondition("subsystem %q is a subsystem of "+
+			"storage pools %q and %q already, and at most two pools hold "+
+			"one NQN", req.GetNqn(), others[0], others[1])
+	}
 	var ssId uint64
-	err := s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
+	err = s.cli.RunSTM(ctx, func(stm etcdutil.STM) error {
 		ssId = 0
 		sc, err := openSp(stm, req.GetClusterName(), req.GetSpName(),
 			req.GetSpRev())
@@ -177,6 +291,10 @@ func (s *Server) CreateSubsystem(
 		// true by construction rather than by trusting EU4.
 		cntlrs, err := loadCntlrs(stm, sc.Cid, conf)
 		if err != nil {
+			return err
+		}
+		if err := sharedNqnCheck(stm, sc.Cid, req.GetSpName(), cntlrs,
+			others, req.GetNqn(), req.GetShareNqn()); err != nil {
 			return err
 		}
 		minter := newSpIdMinter(conf)

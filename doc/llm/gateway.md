@@ -1218,7 +1218,10 @@ set.
   slices, which size the scan, and its cntlrs, whose CNs the scan excludes;
   no clone is read, since a clone charges no CN (`architecture.md`,
   Metadata units). The locations are read after the snapshot,
-  from those CNs' `CnConf`s (`cnLocations`), outside every transaction.
+  from those CNs' `CnConf`s (`cnLocations`), outside every transaction,
+  and so are the CNs of the cntlrs of every other pool that holds a
+  subsystem of an NQN the SP holds (`model.SharedNqnCnAddrs`), which the
+  scan black-lists (`architecture.md`, Finding CN candidates).
   STM: resolve; token; the `MaxCntlrCntPerSp` ceiling again; the slot in
   `cntlid_slot_list` and unused, else
   `INVALID_ARGUMENT`; the gain check of `architecture.md`, Per-operation
@@ -1355,7 +1358,14 @@ are those of `architecture.md`, Subsystems, namespaces.
 
 * **CreateSubsystem** — the NQN valid (`architecture.md`, Common
   validation, the dnv-namespace rule included; the discovery NQN can never
-  validate) and absent; mint `ss_id`; the serial is
+  validate) and absent; the shared-NQN check (`sharedNqnCheck`): the names
+  of the cluster's other pools that hold the NQN from one range of the pool
+  records before the STM (`sharingPoolNames`), two or more of them
+  `FAILED_PRECONDITION` there, and in the STM the one pool's record again,
+  the NQN it still holds `FAILED_PRECONDITION` naming it without
+  `share_nqn`, and with it a CN of a cntlr of both pools
+  `FAILED_PRECONDITION` naming the CN (`architecture.md`, Subsystems,
+  namespaces); mint `ss_id`; the serial is
   `ss_id` rendered with `IdKeyFmt` and the model is `NvmeModel`
   (`architecture.md`, [D2]); put the `Subsystem` with an empty `ns_list`
   and the `allowed_hosts`, append to `nqn_list`, and put the `CdcEntry` —

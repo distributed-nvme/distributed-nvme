@@ -1241,10 +1241,12 @@ prefix, a kind this build knows, and exactly the id count that kind carries,
 each a full `IdKeyFmt` field. A name that does not decode exactly is "not a
 dnv name" rather than a partly-read one, because the caller's next move is a
 removal. A subsystem in a cn's nvmet tree whose NQN does not decode is a
-host-facing one, which the cn agent attributes by the held request that
-still names it or else by the namespaces it is built out of, and with none
-of those, at node level only, by its hosts and port links, then its model
-when it has one and its age when it has neither; one dnv did not make that
+host-facing one, which the cn agent attributes to no pool while two held
+requests name it (`cnagent.md` CN16, A shared NQN), else by the held
+request that still names it or else by the namespaces it is built out
+of, and with none of those, at node level only, by its hosts and port
+links, then its model when it has one and its age when it has neither;
+one dnv did not make that
 holds a namespace device, an allowed host or a port link, an operator's own
 export on the same kernel, is foreign and never touched (`cnagent.md` CN21);
 one carrying the dnv prefix is touched only while a held request names it
@@ -1765,7 +1767,16 @@ Per-operation allocation fills, at tier 1, with the `location`s of the SP's
 other cntlrs); it skips black-listed, non-white-listed and
 duplicate-location CNs and CNs that already host a cntlr of the same SP.
 The draw spreads a machine's disks, and a controller node has none; a CN
-counts no metadata units, since no copy keeps its metadata there.
+counts no metadata units, since no copy keeps its metadata there. A cntlr
+pick for a pool that holds subsystems — CreateCntlr and the worker's cntlr
+replacement (`dnv-worker.md` AR7) — also black-lists the CNs of the cntlrs
+of every other pool of the cluster that holds a subsystem of an NQN the
+pool holds (`model.SharedNqnCnAddrs`, read from the cluster's pool records
+outside the STM). Reason: such a CN holds one kernel subsystem for the NQN,
+which only one pool's cntlr at most built and which no cntlr changes while
+both are there (`cnagent.md` CN16, A shared NQN).
+A pool create holds no subsystem yet, and a subsystem committed in another
+pool after the read is met by the cn agent's own refusal.
 
 ### Per-operation allocation
 
@@ -2779,10 +2790,13 @@ give the rest. A pool's rows are:
   where WithdrawGrow refuses, lists none;
 * a report row that reads `RES_STATUS_ERROR`, a leg's row with an identity
   reason, a subsystem's or a transfer's subsystem row that reads
-  `RES_STATUS_PENDING`, which only a host taken off its list that keeps its
+  `RES_STATUS_PENDING`, which a host taken off its list that keeps its
   connection gives, and under which the primary's converges make the
   subsystem dark, save a namespace whose move fails (`cnagent.md` CN33),
-  and a clone's row that waits for its source (Live-state reporting);
+  or, with `RES_REASON_SHARED_NQN` and a text of its own, a subsystem whose
+  NQN a cntlr of another pool on the node names too (`cnagent.md` CN16, A
+  shared NQN), and a clone's row that waits for its source (Live-state
+  reporting);
 * a health epoch of a cntlr, a leg, a side, a clone meta group's leg or
   side, a repair's new leg or its side, or a retired leg's side; a leg's
   row is one row with its sides' epochs, its report row and the bad blocks
@@ -3932,7 +3946,21 @@ point-in-time, above).
 dnv-namespace one included; `ALREADY_EXISTS` subsystem key;
 `RESOURCE_EXHAUSTED` at `MaxSsCntPerSp`; `INVALID_ARGUMENT` when
 `allowed_hosts` holds more than `MaxHostCntPerSs` entries or any entry
-fails the host-NQN rules. Action: STM: `ss_id` from `next_id`; the serial
+fails the host-NQN rules; `FAILED_PRECONDITION`, naming the pool, for an
+NQN another pool of the cluster holds a subsystem of, unless the request
+sets `share_nqn`, and with it, naming the node, while a CN holds a cntlr
+of both pools; `FAILED_PRECONDITION`, naming both, for an NQN two other
+pools hold, with or without `share_nqn`. The names of the pools that hold
+the NQN are read in one range of the pool records before the STM, and the
+one pool's record again inside it, so a pool that takes the NQN after the
+range is not seen: two creates of one NQN in two pools at once can both
+commit, and the cn agent's rule is then what keeps either pool's volume
+from the other's hosts on a CN of both (`cnagent.md` CN16, A shared NQN). Reason: the kernel holds one subsystem
+per NQN, so a CN of both pools builds only one pool's at most (`cnagent.md`
+CN16, A shared NQN); the move of a volume to another pool needs the pair
+(Transfer + clone = cross-SP live migration), and the gateway cannot tell
+a move from a mistake, so the operator asks for it; a pair is all a move
+needs, and it keeps the STM's reads to one other pool. Action: STM: `ss_id` from `next_id`; the serial
 is the `ss_id` rendered with `IdKeyFmt` and the model is
 `NvmeModel` ([D2]); write the `Subsystem` with an empty `ns_list`,
 append to `nqn_list`, write the `CdcEntry` — the NQN, the transport confs
@@ -5789,7 +5817,10 @@ with `ResStatus`:
   connected after the cut's wait, after a write of "fatal" the kernel
   refused, after a failed read of a written connection's "state", or at a
   read whose listing shows it, while the rest of the row is ok (`cnagent.md`
-  CN33). A subsystem whose nvmet connections the agent cannot read, or whose
+  CN33); on a cntlr's subsystem row of a shared NQN, with
+  `RES_REASON_SHARED_NQN`, the cntlr built the kernel subsystem, or has no
+  namespace under the NQN, while a cntlr of another pool of its node names
+  the NQN too (`cnagent.md` CN16, A shared NQN). A subsystem whose nvmet connections the agent cannot read, or whose
   stray connection a lockdown the lockdown file shows keeps from being
   ended, reads `RES_STATUS_ERROR` instead; only a read names that row, so
   its check rounds count (`cnagent.md` CN30; `dnv-worker.md` AR5, AR10). It
@@ -5914,7 +5945,10 @@ repair's bad leg with no health epoch (Repairs, A leg of another identity);
 row whose status line carries needs_check, or `Fail` or `Error` in place of
 its numbers; `RES_REASON_POOL_META_DAMAGED`, which `cnagent.md` CN13 sets on
 the `ERROR` pool row of a slice whose metadata its `thin_check` refused, and
-`dnv-worker.md` HL2 reads;
+`dnv-worker.md` HL2 reads; `RES_REASON_SHARED_NQN`, which `cnagent.md` CN16
+sets on the `PENDING` or `ERROR` subsystem row of a shared NQN, which no
+health rule reads and to whose `PENDING` row the gateway's status read
+gives a text of its own (`gateway.md` GW20);
 `RES_REASON_AWAITING_CUTOVER`, which `dnagent.md` DN13 sets on a migration
 destination's two `PROVISIONING` migration rows and `dnv-worker.md` RW18
 reads; `RES_REASON_SP_LEVEL`, which `cnagent.md` CN19 sets on every
@@ -7706,9 +7740,10 @@ transfer, the pair performs live migration of a volume between SPs, even
 across clusters (figs `090Clone` and `100Transfer`, Clones and Transfers).
 Setup for moving a subsystem and namespace from sp1 to sp2:
 
-* sp2 gets an identical subsystem (the same NQN and the same allowed
-  hosts, granted only once the sp2 namespace is suspended, the third
-  bullet, and before `CreateTransfer`) and namespace (the same
+* sp2 gets an identical subsystem (the same NQN, `CreateSubsystem` with
+  `share_nqn`, which refuses while a CN holds a cntlr of both SPs, and the
+  same allowed hosts, granted only once the sp2 namespace is suspended, the
+  third bullet, and before `CreateTransfer`) and namespace (the same
   `ns_idx`, and the same nguid and uuid, passed to `CreateNamespace`,
   Subsystems, namespaces) on a **fresh, empty** thin device [D3], so hosts
   aggregate sp1's and sp2's exports into one multipath device. The
@@ -7743,7 +7778,13 @@ Setup for moving a subsystem and namespace from sp1 to sp2:
   one's own slot when the two SPs' cntlrs fill every slot, since both SPs
   then hold `MaxCntlrCntPerSp` cntlrs and the rotation deletes first; add
   a CN first when none is eligible, since the old cntlr's CN holds a cntlr
-  of the other SP and so stays black-listed after a delete.
+  of the other SP and so stays black-listed after a delete. Once both SPs
+  hold the NQN, CreateCntlr and the worker's cntlr replacement keep a cntlr
+  of either off the other's CNs (Finding CN candidates), and a CN that
+  still holds a cntlr of both changes neither's subsystem: the cntlr that
+  built it keeps it as built, and the other builds nothing and reads an
+  error, so the worker moves it off the node (`cnagent.md` CN16, A shared
+  NQN).
 * Ensure `Namespace.suspended` false on sp1 and true on sp2 (create the
   sp2 namespace with `CreateNamespace` and `suspended` true, or
   `UpdateNamespaceSuspended` on an existing one).

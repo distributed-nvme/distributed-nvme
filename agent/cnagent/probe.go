@@ -515,6 +515,24 @@ func (s *CnAgentServer) probeCntlr(
 	ssRows := make(map[uint64]ssRow, len(plan.subsystems))
 	for _, ssp := range plan.subsystems {
 		var row ssRow
+		if ssp.shared != "" {
+			// CN16, A shared NQN: read as the converge reads it; its rows
+			// are written below.
+			s.markOwnShared(ctx, plan, ssp)
+			continue
+		}
+		// A subsystem another pool's cntlr built, which the converge
+		// replaces (replaceForeignSubsys), is not safe and reads ERROR.
+		foreign, _, err := s.foreignNs(ctx, plan, ssp)
+		if err != nil {
+			foreign = fmt.Sprintf("reading the namespaces of %s: %v",
+				ssp.nqn, err)
+		}
+		if foreign != "" {
+			row.status, row.details = pb.ResStatus_RES_STATUS_ERROR, foreign
+			ssRows[ssp.ssId] = row
+			continue
+		}
 		row.status, row.details, ssp.safe = s.readExport(
 			ctx, s.subsysConf(plan, ssp))
 		ssRows[ssp.ssId] = row
@@ -527,13 +545,22 @@ func (s *CnAgentServer) probeCntlr(
 			nsDevReason(status, details))
 	}
 	for _, ssp := range plan.subsystems {
-		// The subsystem's row, read above with whether it is safe; its
-		// namespaces' rows want the inaccessible group while it is not.
-		row := ssRows[ssp.ssId]
-		info.SsIdToSubsystem[ssp.ssId] = t.Set(
-			resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, row.status,
-			row.details)
+		if ssp.shared != "" {
+			s.reportSharedSubsys(t, ssp, info)
+		} else {
+			// The subsystem's row, read above with whether it is safe; its
+			// namespaces' rows want the inaccessible group while it is not.
+			row := ssRows[ssp.ssId]
+			info.SsIdToSubsystem[ssp.ssId] = t.Set(
+				resKeyOf(resKeySubsysFmt, ssp.ssId), ssp.nqn, row.status,
+				row.details)
+		}
 		for _, np := range ssp.namespaces {
+			if ssp.shared != "" && !np.ownShared {
+				// CN16, A shared NQN: a namespace not over its own ns-dev
+				// gets no row, as the converge writes none.
+				continue
+			}
 			// np.anaGrpId already carries [D15]'s fourth conjunct, so a deferred
 			// namespace matches at ana_grpid = 3 and is healthy — it is only
 			// not yet ready, which is what PROVISIONING says.

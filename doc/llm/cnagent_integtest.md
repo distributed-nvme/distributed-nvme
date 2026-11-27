@@ -50,7 +50,7 @@ a host left on the list writes on, and on a primary and a standby at once
 leftover, an accepted request reporting residue (`cnagent.md` CN20). The
 cases run in a fixed order, fail-fast — nodecheck, smoke, redund, repair,
 teardown, thinbm, torn, discard, isolation, clone_xfer, restart, pause,
-groupcut, thinrepair — nodecheck
+groupcut, thinrepair, sharednqn — nodecheck
 building no pool and each other case under pool ids of its own, and each
 leaving nothing of its pools, a teardown per case and per stage that also
 keeps the run inside a DN's data area, which the cases together would
@@ -1399,6 +1399,24 @@ group's array or a leg's NVMe device, an active volume of the planted
 group, a physical volume recorded online, a bcache device — is read from
 the node; the cleanup's sweep of what the system made of the foreign
 signatures removes it.
+
+**sharednqn** proves `cnagent.md` CN16, A shared NQN, on one node: pool A,
+its S shape on DN1, and pool B, its S shape on DN2, each have a cntlr on
+CN1, and both name one subsystem NQN and one namespace identity, as the
+two pools of a move do. Pool A builds the subsystem and the host writes a
+4 MiB pattern through it. Pool B's cntlr then writes nothing under that
+kernel subsystem, its pool built as any, and its subsystem row reads
+`RES_STATUS_ERROR` naming pool A; pool A's next converge writes nothing
+either and its row reads `RES_STATUS_PENDING` naming pool B, as the cntlr
+that built it; through both, the namespace's device stays pool A's
+namespace device, its path stays optimized and the host reads pool A's
+pattern, never pool B's empty volume. Once pool B's cntlr leaves CN1,
+pool A's converge builds the subsystem again, a check round clean. Pool
+B's cntlr then comes back, its row reads `RES_STATUS_ERROR` again, and
+pool A's cntlr leaves first: the node's sweep, re-sent until clean, takes
+pool A's namespace out of the subsystem and removes its namespace device,
+and pool B's converge builds its own namespace, its device pool B's
+namespace device, a check round of pool B clean.
 
 ## Teardown and cleanup
 

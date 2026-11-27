@@ -237,7 +237,12 @@ status and the reason of the row it shows follow where it has them:
   or cannot. Its text says that while it does, the cntlr's converges move
   the subsystem's namespaces to ANA inaccessible, away from every host,
   and then gives the row's own text ([Change a volume's
-  hosts](#change-a-volumes-hosts)).
+  hosts](#change-a-volumes-hosts)). A subsystem's `row/pending` whose
+  text says that a cntlr of another pool on this controller node names
+  the same subsystem is the other case: two pools hold a subsystem of one
+  name and both have a cntlr on that node, and no cntlr of the node
+  changes the subsystem until one of them moves ([Move a volume to
+  another pool](#move-a-volume-to-another-pool), step 13).
 - `health`: the worker has set a health epoch; the age is how long ago.
 - `group`: a group's array is not whole, the primary refuses to add a leg,
   the operator is in charge of the group's repair, a forced-start mark
@@ -1397,12 +1402,16 @@ Safe steps, to move every volume of the pool to a new pool:
      subsystem of each name, which the cntlrs of both pools would claim,
      and a host refuses a second path to a subsystem whose controller id
      another of its paths already uses. So the cluster needs controller
-     nodes beyond those of the old pool. This list too binds only the
-     create: a cntlr replacement of either pool may later place a cntlr on
-     a controller node of the other pool. Before each move of step 2, and
-     while its copy runs, compare the `addr_port` of the cntlrs that
-     `dnvctl sp get` shows for both pools. If two share a controller node, stop moving and move one
-     of them to another controller node, the new cntlr first, as
+     nodes beyond those of the old pool. Once the new pool holds a
+     subsystem of a name the old pool holds, which the moves of step 2
+     make with `ss create --share-nqn`, the worker's cntlr replacement and
+     `dnvctl cntlr create` keep a cntlr of either pool off a controller
+     node of the other, and the gateway refuses that subsystem while a
+     controller node holds a cntlr of both. Before each move of step 2,
+     and while its copy runs, still compare the `addr_port` of the cntlrs
+     that `dnvctl sp get` shows for both pools. If two share a controller
+     node, stop moving and move one of them to another controller node,
+     the new cntlr first, as
      [Replace a cntlr by hand](#replace-a-cntlr-by-hand) says. Create the
      new cntlr with
      `dnvctl cntlr create --slot <slot> --cn-black <the other pool's controller nodes>`,
@@ -4546,9 +4555,10 @@ Before you start, check five things:
    only after the transfer has parked the origin. The simple way: give the
    destination pool the source's stripe and slice count.
 2. The two pools' cntlrs: no controller node may hold a cntlr of both
-   pools, and their cntlid slots, the ranges of NVMe controller ids a
-   pool's exports use, must differ. `dnvctl sp get` of each pool shows
-   each cntlr's `addr_port` and `cntlid_slot`. Step 1 of [A pool made
+   pools, which the gateway checks at step 3 too when that step creates
+   the subsystem, and their cntlid slots, the ranges of NVMe controller
+   ids a pool's exports use, must differ. `dnvctl sp get` of each pool
+   shows each cntlr's `addr_port` and `cntlid_slot`. Step 1 of [A pool made
    before the block bound](#a-pool-made-before-the-block-bound) says how to
    create the destination pool so, and how to move a cntlr that breaks
    this. A cntlr of the destination may run on a machine that is one of
@@ -4602,7 +4612,16 @@ Safe steps:
    holds.
 3. In the destination pool, create the subsystem with no hosts, if that
    pool does not hold it yet: `dnvctl --sp <destination> ss create --nqn
-   <nqn>`.
+   <nqn> --share-nqn`. Without `--share-nqn` the gateway refuses an NQN
+   that another pool of the cluster holds, with the error code
+   FAILED_PRECONDITION naming that pool; with it, it refuses while a
+   controller node holds a cntlr of both pools, naming the node, as on
+   such a node no cntlr changes the subsystem: the cntlr that built it
+   keeps it as it was built, and the other builds nothing. With or
+   without it, the gateway refuses a name that two other pools hold, as
+   at most two pools share one subsystem name. The gateway checks the
+   other pools as they stand when the create starts, so do not create a
+   subsystem of this name in a third pool at the same time.
 4. Create the namespace there, parked, at the origin's index and with its
    identity: `dnvctl --sp <destination> ns create --nqn <nqn> --idx
    <ns_idx> --td <new volume> --uuid <dev_uuid> --nguid <dev_nguid>
@@ -4686,11 +4705,19 @@ Safe steps:
     `dnvctl --sp <source> xfer set-hosts --name <transfer> --hosts <the
     whole new list>`. A cntlr replacement, which the worker makes once a
     cntlr has been unhealthy for its pool's `cntlr_unhealthy`, 600 seconds
-    at the default, can place a cntlr of either pool on a controller node
-    that holds a cntlr of the other, which check 2 forbids. So compare the
-    `addr_port` of both pools' cntlrs too. When two share a controller
-    node, move one of them to another controller node at once, the new
-    cntlr first, as step 1 of [A pool made before the block
+    at the default, keeps a cntlr of either pool off a controller node
+    that holds a cntlr of the other, as does `dnvctl cntlr create`. A
+    controller node that still holds a cntlr of both pools, as one placed
+    before dnv kept them apart, changes neither pool's subsystem: the
+    cntlr that built it keeps it as it was built, so its hosts keep their
+    paths, but a host added to its list and a new namespace do not reach
+    the node, and its subsystem row reads pending; the other cntlr builds
+    nothing, and
+    its subsystem row reads an error that names the other pool, so the
+    worker replaces that cntlr once it has been unhealthy for
+    `cntlr_unhealthy`. Move one of the cntlrs to another controller node
+    at once, the new cntlr first, as
+    step 1 of [A pool made before the block
     bound](#a-pool-made-before-the-block-bound) says, and then check the
     two cases above again.
 14. Wait until the copy is whole: `dnvctl --sp <destination> clone get

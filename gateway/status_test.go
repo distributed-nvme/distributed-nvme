@@ -2065,7 +2065,9 @@ func TestStatusDeadlineNamesOnlyTheCallItCuts(t *testing.T) {
 // gives that status only while a host taken off the list keeps its
 // connection (exportRow (agent/cnagent/nvmetconn.go)), and its converges
 // then move the subsystem's namespaces to ANA inaccessible. A PENDING row of
-// another table gives no line, and neither does an OK subsystem row.
+// another table gives no line, and neither does an OK subsystem row. A
+// PENDING subsystem row with RES_REASON_SHARED_NQN (cnagent.md CN16, A shared
+// NQN) gives a line of its own text, and not the host cut's.
 func TestStatusSubsystemHostCutPending(t *testing.T) {
 	env := newStEnv(t)
 	cn, fake := env.addCn("cn")
@@ -2076,6 +2078,9 @@ func TestStatusSubsystemHostCutPending(t *testing.T) {
 			7: {Status: pb.ResStatus_RES_STATUS_PENDING, Details: cut,
 				Epoch: uint64(epoch.Unix())},
 			8: {Status: pb.ResStatus_RES_STATUS_OK},
+			11: {Status: pb.ResStatus_RES_STATUS_PENDING,
+				Details: "also named by pool 5 (cntlr 1)",
+				Reason:  pb.ResReason_RES_REASON_SHARED_NQN},
 		},
 		XferIdToSubsystem: map[uint64]*pb.ResInfo{
 			9: {Status: pb.ResStatus_RES_STATUS_PENDING, Details: cut},
@@ -2087,10 +2092,19 @@ func TestStatusSubsystemHostCutPending(t *testing.T) {
 	env.put(env.newPool("p0", cn, stDns(env)))
 	rows := stKinds(stRowsOf(env.status(0, ""), "p0"),
 		pb.StatusKind_STATUS_KIND_ROW)
-	if len(rows) != 2 {
-		t.Fatalf("%d row lines, want 2 (the subsystem's and the "+
+	if len(rows) != 3 {
+		t.Fatalf("%d row lines, want 3 (two subsystems' and the "+
 			"transfer's): %v", len(rows), rows)
 	}
+	shared := rows[1]
+	if shared.GetObject() != "subsystem id 11" ||
+		!strings.Contains(shared.GetText(), msgSharedNqnPending) ||
+		strings.Contains(shared.GetText(), "keeps its connection") ||
+		!strings.Contains(shared.GetText(), "pool 5") {
+		t.Errorf("the shared subsystem's line is %q %q", shared.GetObject(),
+			shared.GetText())
+	}
+	rows = []*pb.StatusRow{rows[0], rows[2]}
 	for _, row := range rows {
 		stWantStatus(t, row, pb.ResStatus_RES_STATUS_PENDING)
 		for _, fragment := range []string{

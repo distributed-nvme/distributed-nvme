@@ -418,6 +418,64 @@ func FindCnCandidates(
 	return cands, nil
 }
 
+// SharedNqnCnAddrs lists the CNs a cntlr of the pool spId must not land on
+// for a shared NQN (architecture.md, Finding CN candidates; cnagent.md CN16,
+// A shared NQN): the addr_port of every cntlr of every other pool of the
+// cluster that holds a subsystem of an NQN in nqnList, the pool's own
+// nqn_list. Such a CN holds one kernel subsystem for the NQN, which no cntlr
+// there changes while both name it, and which the pool whose cntlr did not
+// build it does not serve there. It reads every pool record of the cluster
+// in one range, and the cntlr records of the pools that share an NQN; a pool
+// that holds no subsystem, as at its create, skips nothing.
+func SharedNqnCnAddrs(
+	ctx context.Context,
+	cli *etcdutil.Client,
+	cid uint64,
+	spId uint64,
+	nqnList []string,
+) ([]string, error) {
+	if len(nqnList) == 0 {
+		return nil, nil
+	}
+	want := strSet(nqnList)
+	kvs, _, err := cli.Range(ctx, SpConfPrefix(cid))
+	if err != nil {
+		return nil, err
+	}
+	var addrs []string
+	for _, kv := range kvs {
+		conf := &pb.SpConf{}
+		if err := cli.Decode(ctx, kv, conf); err != nil {
+			return nil, err
+		}
+		if conf.GetSpId() == spId {
+			continue
+		}
+		shares := false
+		for _, nqn := range conf.GetNqnList() {
+			if _, ok := want[nqn]; ok {
+				shares = true
+				break
+			}
+		}
+		if !shares {
+			continue
+		}
+		for _, cntlrId := range conf.GetCntlrIdList() {
+			cntlr := &pb.Cntlr{}
+			found, err := cli.Get(ctx,
+				CntlrKey(cid, conf.GetSpId(), cntlrId), cntlr)
+			if err != nil {
+				return nil, err
+			}
+			if found {
+				addrs = append(addrs, cntlr.GetAddrPort())
+			}
+		}
+	}
+	return addrs, nil
+}
+
 // FindCnCandidatesAntiAffine is FindCnCandidates with the two-tier location
 // rule of architecture.md, Per-operation allocation, for a cntlr pick: tier 1
 // excludes excludeLocs; when it finds

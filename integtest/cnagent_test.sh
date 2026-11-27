@@ -300,7 +300,7 @@ GCUT_REPORTS=()
 GCUT_FO=""
 
 CASES=(nodecheck smoke redund repair teardown thinbm torn discard isolation
-	clone_xfer restart pause groupcut thinrepair)
+	clone_xfer restart pause groupcut thinrepair sharednqn)
 
 # ---------------------------------------------------------------------------
 # Logging, assertions, failure handling
@@ -14700,6 +14700,148 @@ TR_TD2=0x1e
 # OK after a check that passes.
 TR_DAMAGE_WAIT=150
 TR_CHECK_WAIT=120
+
+# case_sharednqn proves cnagent.md CN16, A shared NQN, on one node: pool A,
+# on DN1, and pool B, on DN2, each have a cntlr on CN1, and both name one
+# NQN and one namespace identity, as the two pools of a move do. Pool A
+# builds the subsystem and the host writes a pattern through it; pool B's
+# cntlr then writes nothing under that kernel subsystem and its subsystem
+# row reads an error naming pool A; pool A's next converge writes nothing
+# either and its row reads pending naming pool B; through both, the host
+# reads pool A's pattern, never pool B's empty volume, and the namespace's
+# device stays pool A's. Once pool B's cntlr leaves the node, pool A builds
+# its subsystem again. Pool B's cntlr then comes back, and this time pool
+# A's cntlr leaves first: the node's sweep takes pool A's namespace out of
+# the subsystem, and pool B's converge builds its own, over its own
+# namespace device.
+case_sharednqn() {
+	CASE=sharednqn
+	DIAG_CNTLRS=()
+	SIDE_PROVISIONED=()
+	local spa=0x461 spb=0x462 cntlr=0x1 cn=1 hv=2
+	local nqn="$NQN_IT_PREFIX:sh:vol1"
+	local uuid=66666666-6666-4666-8666-666666666666
+	local reqa="$WORK/req-sharednqn-a.json" reqb="$WORK/req-sharednqn-b.json"
+	local out dev want devpath nsdeva rev
+	diag_cntlr "$cn" "$spa" "$cntlr"
+	diag_cntlr "$cn" "$spb" "$cntlr"
+	dev=$(host_dev "$uuid")
+	nsdeva=/dev/mapper/$(cn_dm_name c6 "$cn" "$spa" "$S_NS")
+	devpath="/sys/kernel/config/nvmet/subsystems/$nqn/namespaces/1/device_path"
+
+	stage dn "pool A's S shape on DN1, pool B's on DN2, both for CN1"
+	dn_pointers 1 "$spa:$S_MLEG:$S_MSIDE" "$spa:$S_DLEG:$S_DSIDE"
+	dn_side 1 "$spa" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side 1 "$spa" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_pointers 2 "$spb:$S_MLEG:$S_MSIDE" "$spb:$S_DLEG:$S_DSIDE"
+	dn_side 2 "$spb" "$S_MLEG" "$S_MSIDE" 1 "$NONE_MGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+	dn_side 2 "$spb" "$S_DLEG" "$S_DSIDE" 2 "$NONE_DGRP_ZERO_BYTES" \
+		"${CNID[$cn]}"
+
+	stage a "pool A builds the subsystem on CN1 and the host writes through it"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" --cntlr "$spa:$cntlr")
+	assert_cn_info_ok "$out" "sharednqn syncup-cn A"
+	req_none "$reqa" "$cn" 1 "$spa" "$cntlr" 0 "$nqn" "$uuid" false
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$reqa")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "sharednqn A"
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "sharednqn A"
+	host_connect "$hv" "$cn" "$nqn"
+	helper "$hv" "wait_dev '$dev' 20" || die "no device node $dev on vm$hv"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	make_pattern "$hv" "$WORK/pattern-sh.bin" 4
+	want=$(sha_range "$hv" "$WORK/pattern-sh.bin" 4)
+	write_range "$hv" "$WORK/pattern-sh.bin" "$dev" 4
+	assert_eq "$(sshv "$cn" "cat $devpath" | tr -d ' ')" "$nsdeva" \
+		"sharednqn: the namespace's device is pool A's"
+
+	stage b "pool B's cntlr on CN1 names the same NQN: it builds nothing of it, and names pool A"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" \
+		--cntlr "$spa:$cntlr" --cntlr "$spb:$cntlr")
+	assert_cn_info_ok "$out" "sharednqn syncup-cn A and B"
+	req_none "$reqb" "$cn" 2 "$spb" "$cntlr" 1 "$nqn" "$uuid" false
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$reqb")
+	assert_map_status "$out" ss_id_to_subsystem "$S_SS" RES_STATUS_ERROR \
+		"pool $((spa)) (cntlr $((cntlr)))" "sharednqn B"
+	assert_map_ok "$out" slice_id_to_dm_pool "$S_SLICE" "sharednqn B"
+	assert_eq "$(sshv "$cn" "cat $devpath" | tr -d ' ')" "$nsdeva" \
+		"sharednqn: the namespace's device is pool A's beside pool B"
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 4 0)" "$want" \
+		"sharednqn: the host reads pool A's pattern beside pool B"
+
+	stage again "pool A's next converge writes nothing under the NQN, keeps it as built and names pool B"
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$reqa")
+	assert_map_status "$out" ss_id_to_subsystem "$S_SS" RES_STATUS_PENDING \
+		"pool $((spb)) (cntlr $((cntlr)))" "sharednqn A beside B"
+	assert_eq "$(sshv "$cn" "cat $devpath" | tr -d ' ')" "$nsdeva" \
+		"sharednqn: the namespace's device is still pool A's"
+	host_wait_ana "$hv" "$nqn" "$cn" optimized 20
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 4 0)" "$want" \
+		"sharednqn: the host still reads pool A's pattern"
+
+	stage leave "pool B's cntlr leaves CN1; pool A builds its subsystem again"
+	# The drop of pool B's cntlr disconnects its legs off the sweep's locks,
+	# so its first reply names them leftover, and the re-send is clean
+	# (cnagent.md CN10, CN21).
+	bump_cn_sync "$cn"
+	cn_resync_until_clean "$cn" 30 --cntlr "$spa:$cntlr"
+	bump_cn_rev "$cn"
+	rev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$reqa")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "sharednqn A alone"
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "sharednqn A alone"
+	drop_caches "$hv"
+	assert_eq "$(sha_range "$hv" "$dev" 4 0)" "$want" \
+		"sharednqn: the host reads pool A's pattern once pool B left"
+
+	stage check "converge check round"
+	converge_check "$cn" "$spa" "$cntlr" "$rev"
+
+	stage rejoin "pool B's cntlr comes back to CN1: it builds nothing, and names pool A"
+	bump_cn_sync "$cn"
+	out=$(cnctl "$cn" syncup-cn --revision "${CNREV[$cn]}" \
+		--cntlr "$spa:$cntlr" --cntlr "$spb:$cntlr")
+	assert_cn_info_ok "$out" "sharednqn syncup-cn A and B again"
+	bump_cn_rev "$cn"
+	out=$(cn_syncup_cntlr "$cn" "$reqb")
+	assert_map_status "$out" ss_id_to_subsystem "$S_SS" RES_STATUS_ERROR \
+		"pool $((spa)) (cntlr $((cntlr)))" "sharednqn B again"
+	assert_eq "$(sshv "$cn" "cat $devpath" | tr -d ' ')" "$nsdeva" \
+		"sharednqn: the namespace's device is pool A's beside pool B again"
+
+	stage builder "pool A's cntlr leaves CN1 first: its namespace goes, and pool B builds its own"
+	# The node's sweep moves pool A's namespace inaccessible before it parks
+	# pool A's namespace device, takes the namespace out of the subsystem and
+	# removes the device (cnagent.md CN16, A shared NQN; CN21).
+	bump_cn_sync "$cn"
+	cn_resync_until_clean "$cn" 30 --cntlr "$spb:$cntlr"
+	assert_eq "$(sshv "$cn" "ls /sys/kernel/config/nvmet/subsystems/$nqn/namespaces" | tr -d ' \n')" "" \
+		"sharednqn: the namespaces under the subsystem once pool A left"
+	bump_cn_rev "$cn"
+	rev=${CNREV[$cn]}
+	out=$(cn_syncup_cntlr "$cn" "$reqb")
+	assert_map_ok "$out" ss_id_to_subsystem "$S_SS" "sharednqn B alone"
+	assert_map_ok "$out" ns_id_to_namespace "$S_NS" "sharednqn B alone"
+	assert_eq "$(sshv "$cn" "cat $devpath" | tr -d ' ')" \
+		"/dev/mapper/$(cn_dm_name c6 "$cn" "$spb" "$S_NS")" \
+		"sharednqn: the namespace's device is pool B's once pool A left"
+	converge_check "$cn" "$spb" "$cntlr" "$rev"
+
+	stage teardown "empty cntlr lists, then empty side lists"
+	host_disconnect "$hv" "$nqn"
+	cn_drop "$cn"
+	dn_drop 1
+	dn_drop 2
+}
 
 case_thinrepair() {
 	CASE=thinrepair

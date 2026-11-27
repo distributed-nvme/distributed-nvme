@@ -253,6 +253,7 @@ func (s *CnAgentServer) convergeCntlr(
 	}
 	plan := newCntlrPlan(s.nf, req, thinChecking(st))
 	applyFence(plan, st)
+	s.markShared(plan)
 	// CN12: a forced-start mark acts only from a request that counts as
 	// delivered (cntlrState.reqFromRpc). Any other held request is the
 	// stored copy the startup reconcile loaded, or one whose newer
@@ -728,7 +729,26 @@ func (s *CnAgentServer) build(
 	lists := make(map[uint64]listStep, len(plan.subsystems))
 	if plan.wantAny {
 		for _, ssp := range plan.subsystems {
-			list := s.stepSubsysList(ctx, cutBudget, s.subsysConf(plan, ssp))
+			if ssp.shared != "" {
+				// CN16, A shared NQN: no list step, and so no namespace and
+				// no port link of the subsystem's step, and no ANA move of
+				// another pool's namespaces; ensureSubsystem writes its row
+				// (reportSharedSubsys).
+				s.markOwnShared(ctx, plan, ssp)
+				s.darkenOwnShared(ctx, ssp)
+				continue
+			}
+			// A subsystem another pool's cntlr built while the NQN was
+			// shared goes before the list step (CN16, A shared NQN); one
+			// that cannot go is the step's error, and the subsystem is not
+			// safe in the pass.
+			var list listStep
+			if err := s.replaceForeignSubsys(ctx, plan, ssp); err != nil {
+				list.err = err
+			} else {
+				list = s.stepSubsysList(ctx, cutBudget,
+					s.subsysConf(plan, ssp))
+			}
 			ssp.safe = list.safe
 			if !list.safe {
 				nsIdxs := make([]int, 0, len(ssp.namespaces))
@@ -838,7 +858,8 @@ func (s *CnAgentServer) build(
 		// before a transfer's device step (darkenSubsys), and stays there to
 		// the pass's end (CN33).
 		for _, np := range plan.namespaces {
-			if np.anaGrpId == common.AnaGrpIdInaccessible || !np.ss.safe {
+			if np.anaGrpId == common.AnaGrpIdInaccessible || !np.ss.safe ||
+				(np.ss.shared != "" && !np.ownShared) {
 				continue
 			}
 			outcome := outcomes[np.nsId]
