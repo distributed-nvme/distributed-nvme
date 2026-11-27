@@ -1314,10 +1314,12 @@ func TestRepairAbortedHasNeitherVerdict(t *testing.T) {
 // repair's verdict and a group's reading only for a group whose row reads
 // OK, a running array of a group its plan builds (cnagent.md CN12, CN28):
 // that a new leg is no member of an array that does not run proves nothing.
-// A stopped or broken array, an array that did not start, an array the
-// in-sync guard holds, a standby and a level that builds no group each give
-// neither, on the converge and on a read, while the abort flag is set and
-// the new leg is no member.
+// A stopped or broken array, an array the in-sync guard holds, a standby
+// and a level that builds no group each give neither, on the converge and
+// on a read, while the abort flag is set and the new leg is no member. One
+// exception: with no array of the group there at all, an array that did
+// not start, the abort is confirmed from the new leg's superblock read,
+// which finds none (unheldAbortVerdict), with no group reading.
 func TestRepairVerdictsOnlyFromARunningArray(t *testing.T) {
 	flagged := func(rev uint64) *pb.SyncupCntlrRequest {
 		return repairReq(rev, pb.RepStage_REP_STAGE_CREATED, true)
@@ -1347,9 +1349,16 @@ func TestRepairVerdictsOnlyFromARunningArray(t *testing.T) {
 			t.Fatalf("a refused assembly reads %v",
 				info.GetGrpIdToMdRaid()[testDataGrp])
 		}
-		assertNoReport(t, onlyDataGrp(info), "the converge")
 		read, _ := f.read(t, 4)
-		assertNoReport(t, onlyDataGrp(read), "the read")
+		for _, got := range []struct {
+			label string
+			info  *pb.CntlrInfo
+		}{{"the converge", info}, {"the read", read}} {
+			if n := len(onlyDataGrp(got.info).GetGrpIdToGrpInfo()); n != 0 {
+				t.Fatalf("%s: %d group readings, want none", got.label, n)
+			}
+			assertVerdict(t, got.info, got.label, false, true)
+		}
 	})
 	t.Run("in-sync guard", func(t *testing.T) {
 		// The aborted repair's new leg md holds is no member the group keeps,

@@ -799,9 +799,18 @@ Causes and steps:
   `dnvctl repair create --name <name> --grp <group id> --bad-legs <leg
   id>`. The start does not wait for an open repair's bad leg, but it waits
   until the repair's new leg serves. The group must have no other open
-  repair. The repair is also refused while the group holds two retired
-  legs, and every mark keeps them; deleting one may delete the copy you
-  need, so stop instead.
+  repair. If it has one that has not started, as when the worker's repair
+  for the named leg was created before the other leg died, end that one
+  first: `dnvctl repair abort --name <its name>`, wait until
+  `dnvctl repair get` shows `REP_STAGE_ABORTED`, which the primary
+  confirms while no array of the group is there, once its read of the new
+  leg finds no md superblock, then
+  `dnvctl repair cancel --name <its name>`. If the repair does not reach
+  `REP_STAGE_ABORTED`, as when its new leg was taken back from a retired
+  leg, md added it before the other leg died, or it does not serve, stop
+  and ask for help. The repair is also refused while the group holds two
+  retired legs, and every mark keeps them; deleting one may delete the
+  copy you need, so stop instead.
 - A start from a repair's new leg waits the same way for the leg of the
   list that is not the repair's bad leg.
 - The dry run from the named leg, with the mark's words in `--override`,
@@ -1180,7 +1189,9 @@ Safe steps:
 2. If the worker's repair has not started, abort it with
    `dnvctl repair abort --name <name>`, then drop it with
    `dnvctl repair cancel --name <name>`. The cancel is refused until the
-   primary confirms the abort, which it does only from a running array.
+   primary confirms the abort, which it does from a running array, or,
+   while no array of the group is there, once its read of the new leg
+   finds no md superblock.
    At levels where reactions run, the worker may cancel its aborted repair
    itself, and your cancel then answers that the repair is gone. A repair
    that has started cannot be aborted: finish it with
@@ -3718,9 +3729,11 @@ Safe steps:
    before you touch another leg of the group.
 4. To drop a repair that has not started, abort it with
    `dnvctl repair abort --name <name>`. Once `dnvctl repair get` shows
-   `REP_STAGE_ABORTED`, which the primary confirms only from a running
-   array, run `dnvctl repair cancel --name <name>`. A repair that has
-   started cannot be aborted.
+   `REP_STAGE_ABORTED`, run `dnvctl repair cancel --name <name>`. The
+   primary confirms the abort from a running array, or, while no array of
+   the group is there, from its own read of the new leg: it confirms only
+   when the new leg serves and carries no md superblock, so md never held
+   it. A repair that has started cannot be aborted.
 
 Steps that can lose data: `dnvctl repair create --force` lets an abort copy
 over the bad leg and lets a take-back copy over a retired leg of another

@@ -247,6 +247,20 @@ func (s *CnAgentServer) probeCntlr(
 			}
 			reportGrpReading(info, gp, detail, refusals, actedMark(st, gp),
 				mdCheckDone(st, gp))
+			if found != nil && !found.Exists && gp.rep != nil &&
+				gp.rep.aborting() {
+				// CN12, The abort: with no array of the group, an abort
+				// the new legs' superblocks prove, as the converge reads
+				// it; only an aborting repair costs the read its legs'
+				// availability.
+				readable := s.readAvailability(ctx, plan, gp)
+				if v := s.unheldAbortVerdict(ctx, plan, gp,
+					func(lp *legPlan) bool {
+						return readable[lp.legId]
+					}); v != nil {
+					info.RepIdToRepairInfo[gp.rep.repId] = v
+				}
+			}
 		case plan.primary:
 			info.GrpIdToMdRaid[gp.grpId] = suppressedRow(t, key, gp.resName)
 		}

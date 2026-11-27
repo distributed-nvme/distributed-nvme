@@ -7266,7 +7266,10 @@ cntlrs, and the primary answers in its report, per repair, with one of two
 verdicts: *started*, the new leg holds a place in the array and md holds
 nothing on the bad leg, or *abort
 confirmed*, the new leg is no member of it, which the primary reports
-after it has removed a new leg md held without a place. The worker turns
+after it has removed a new leg md held without a place, or, while no
+array of the group is there, once its own read of each new leg's md
+superblock, on a leg that serves, finds none, since md writes one onto a
+member at its add (`cnagent.md` CN12, The abort). The worker turns
 *started* into STARTED whatever the flag says, and *abort confirmed* into
 ABORTED. So the race has two orders, and both end well: when the primary
 adds the new leg in the round the flag is set, its report says started,
@@ -7345,10 +7348,12 @@ is no row and sets no row to error. Reason: an error row would set the cntlr's
 health epoch and fail the primary over for a refusal the next primary repeats;
 the operator
 aborts and cancels the repair instead (Known limits). A verdict comes only
-from a running array whose group row reads `OK`; which group gives which
-verdict, and when, is `cnagent.md` CN28's. Reason: that a new leg is no
-member of an array that does not run proves nothing about whether md
-wrote to it; and no record keeps the revision at which a repair was
+from a running array whose group row reads `OK`, save the abort confirmed
+while no array of the group is there from the new legs' superblock reads
+(The abort protocol, above); which group gives which verdict, and when, is
+`cnagent.md` CN28's. Reason: that a new leg is no member of an array that
+does not run proves nothing about whether md wrote to it, while a new leg
+with no md superblock holds nothing md kept; and no record keeps the revision at which a repair was
 created or its flag was set, so the report's revision cannot tie a verdict
 to one repair: the `rep_id` key ties it to one record across a finish or a
 cancel and a new create under the same name, and *abort confirmed*

@@ -4116,6 +4116,55 @@ func reportGrpReading(
 	}
 }
 
+// unheldAbortVerdict is CN12's confirmation of a CREATED repair's abort
+// while no array of the group is there, the converge's and the read's
+// alike, nil when it does not hold: the request carries the repair's abort
+// flag (repPlan.aborting), so no pass adds a new leg; the md walk and the
+// array read find no array of the group; and the superblock read of each
+// new leg, on a leg that serves (available, the caller's test of a leg the
+// pass may read), answers with no md superblock. md writes its superblock
+// onto a member at its add, so such a leg holds nothing md kept of the
+// array, and a forced start keeps no new leg of a repair whose flag is set
+// unless its mark names one, which must carry a full member's superblock:
+// the abort is confirmed as when md holds nothing on the new legs of a
+// running array (repairVerdict), and the sp worker moves the repair to
+// ABORTED (dnv-worker.md AR11). Reason: a CREATED repair whose group's
+// array cannot start, as when its other leg is gone for good while a mark
+// waits for it, would otherwise never end, and the group could get no other
+// repair. A new leg that carries a superblock — one md added before the
+// array stopped, or one taken back from a retired leg that no forced start
+// zeroed — and one whose leg does not serve, which cannot be read, are not
+// confirmed this way. A read that fails or does not answer confirms nothing.
+func (s *CnAgentServer) unheldAbortVerdict(
+	ctx context.Context,
+	plan *cntlrPlan,
+	gp *grpPlan,
+	available func(*legPlan) bool,
+) *pb.CntlrInfo_RepairInfo {
+	rp := gp.rep
+	if !gp.raid1 || rp == nil || !rp.aborting() || len(rp.newLegs) == 0 {
+		return nil
+	}
+	walk, err := plan.mdWalks.get(ctx)
+	if err != nil {
+		return nil
+	}
+	detail, err := s.md.Detail(ctx, walk, gp.memberNames())
+	if err != nil || detail.Exists {
+		return nil
+	}
+	for _, lp := range rp.newLegs {
+		if !available(lp) {
+			return nil
+		}
+		reading := s.md.ReadMember(ctx, lp.path)
+		if reading.Err != nil || reading.Sb != nil {
+			return nil
+		}
+	}
+	return &pb.CntlrInfo_RepairInfo{AbortConfirmed: true}
+}
+
 // repairVerdict is the primary's verdict on the group's repair from the
 // members its running array holds (CN12; architecture.md, Repair): started,
 // for an open repair, when every new leg holds a place (MdMember.holdsPlace),

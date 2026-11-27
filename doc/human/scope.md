@@ -2027,10 +2027,18 @@ Measured times are in [the introduction](introduction.md#status-and-limits).
   before the new leg is in the array. When the first leg comes back with
   an older copy, a forced start from it waits for the other leg of the
   group's list, which is gone for good, and a repair for that leg is
-  refused, since the group already has a repair. No call ends the first
-  repair while the array does not run. So the pool stays down, and the
-  older copy can be reached only by hand with mdadm. State: fix decided.
-  Read from dnv's code; not seen in the lab.
+  refused, since the group already has a repair. The first repair can be
+  aborted and cancelled while the array does not run: the primary
+  confirms the abort once its own read of the new leg finds no md
+  superblock. Then a repair for the gone leg, and the forced start, run.
+  The way is not open when the first repair's new leg carries an md
+  superblock — md added it before the other leg died, or it was taken back
+  from a retired leg that keeps its old one — or when the new leg does not
+  serve, so it cannot be read: the pool then stays down, and the older copy
+  can be reached only by hand with mdadm. State: procedure
+  written, [A forced start that waits](operations.md#a-forced-start-that-waits);
+  fix later for the two cases left. Read from dnv's code; not seen in the
+  lab.
 - **The worker's repair cannot finish while both retired legs of its group
   are kept.** A group holds two retired legs at most, and the finish of the
   worker's repair at that bound gives back the oldest one that is not kept.

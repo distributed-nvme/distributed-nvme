@@ -480,6 +480,14 @@ func (s *CnAgentServer) build(
 				// CN12, The md check: an array the pass left not running
 				// holds no check of this incarnation's.
 				forgetMdCheck(st, gp)
+				// CN12, The abort: with no array of the group, an abort
+				// the new legs' superblocks prove.
+				if v := s.unheldAbortVerdict(ctx, plan, gp,
+					func(lp *legPlan) bool {
+						return available[lp.legId]
+					}); v != nil {
+					info.RepIdToRepairInfo[gp.rep.repId] = v
+				}
 			}
 			// CN28: the array's reading and the repair's verdict, from the
 			// array as the pass left it, for a group whose row reads OK.

@@ -2314,7 +2314,22 @@ dm-clone (CN18).
     repair verdict confirms the abort (CN28). A new leg that holds a place
     stays, and the repair verdict says started once md holds nothing on
     the bad leg (below); one md has failed that still sits in its place
-    stays too, with neither repair verdict, until md moves it out.
+    stays too, with neither repair verdict, until md moves it out. While
+    no array of the group is there — the md walk and the array read find
+    none — both channels confirm the abort when the superblock read of
+    every new leg, on a leg that serves, answers with no md superblock
+    (`unheldAbortVerdict`), and give no verdict otherwise, nor a reading.
+    Reason: md writes its superblock onto a member at its add, so such a
+    leg holds nothing md kept of the array, and with the flag in the
+    request no pass adds a new leg and a forced start keeps none unless
+    its mark names it, which needs a full member's superblock, so the
+    confirmation stays true until the cancel; without it a CREATED repair
+    of a group whose array cannot start, as when its other leg is gone for
+    good while a mark waits for it, would never end, and the group could
+    get no other repair. A new leg that carries a superblock — a leg md
+    added before the array stopped, or one taken back from a retired leg
+    that no forced start zeroed — and one whose leg does not serve, which
+    is not read, are not confirmed so.
   * A bad leg that md holds without a place is `--remove`d once the
     repair has started in md: it is STARTED, or it is CREATED, with or
     without the abort flag, and md holds every new leg in a place. The
@@ -6283,7 +6298,10 @@ aborted repair has neither verdict nor refusal, though its held list can
 name a new leg md still holds until the converge removes it. Any other group gives neither verdict nor
 reading: an
 absent, stopped or broken array, the guard's `ERROR`, a deferred group, a
-`RedundNone` group, a level that builds no group and a standby. A read and
+`RedundNone` group, a level that builds no group and a standby; save the
+abort confirmed with no array of the group there, from the new legs'
+superblock reads alone (CN12, The abort), which gives the verdict and no
+reading. A read and
 a converge take both from the array their group row reads, a converge from
 the array as the pass leaves it (CN12), and each refusal from the one
 check both make, through one function, so the two channels report the
