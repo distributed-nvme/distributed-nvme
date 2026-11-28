@@ -2096,16 +2096,15 @@ the connect attempted.
   an fsync only while one is in flight, so the stage delays the primary's
   writes to the meta groups' legs, which lengthens each pool commit and each
   fsync with it. Its jobs keep one schedule, so the reset meets them all at
-  the same point of it. Of its four runs at one slice, two ran with the delay.
-  The first met every job in a write and none in an fsync. The second met
-  every job in its fsync: each of the four fsyncs returned success 4181 to
-  4186 ms after it was sent, before the failover to the standby, which waits
-  out the reacting set's primary threshold from the worker's first unhealthy
-  verdict after the reset (Topology and parameters, Event thresholds), and
-  none of the four writes read back from the new primary, held 0 of 4, which is the
-  loss of `scope.md`'s entry "A host's fsync completes after the primary died
-  with its writes"; the 20 writes whose fsync completed before the reset and
-  the 8 after it read back, and no write or fsync failed. The stage counts the
+  the same point of it. Of 17 runs with the delay, 13 at one slice and 4 at
+  the react case's slice cap, one met every job in a write and none in an
+  fsync, and each of the other 16 met at least three jobs in their fsync. In
+  14 of the 17 at least one write whose fsync was in flight did not read
+  back from the new primary while its fsync returned success, 3.4 to 9.6
+  seconds after it was sent, and in 11 none of the four did, held 0 of 4:
+  the loss of `scope.md`'s entry "A host's fsync completes after the primary
+  died with its writes". In every run every write whose fsync completed
+  before the reset read back. The stage counts the
   fsyncs in flight, held or lost, logs each lost one with its times and the
   longest write or fsync of any job, and asserts nothing of them; the loss is
   a known limit, to be fixed later. A commit slowed this way is not the lab's

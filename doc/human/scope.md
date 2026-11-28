@@ -477,19 +477,19 @@ the bad leg of a cancelled repair that comes back with old data (section
   thin pool has an option that holds a write back until the pool's commit,
   which dnv will use once kernels carry it. Until then an fsync across the
   death of a primary is no guarantee. Read from the kernel's code, and seen
-  in the lab once. The
-  end-to-end suite resets the primary's machine while a host writes 4 KiB
-  to new blocks from four jobs, each write followed by an fsync, and reads
-  every block back after the failover. It has run this four times at one
-  slice. Two of the runs slowed the pool's commits so that the reset could
-  land in an fsync. In the first of the two the reset landed in a write in
-  each of the four jobs. In the second each of the four jobs was in its
-  fsync at the reset: each fsync returned success about 4.2 seconds after
-  it was sent, before the failover to the standby, and none of the four
-  writes read back from the new primary. That is this loss. In every run,
-  every write whose fsync had completed before the reset, any write in
-  flight at the reset and every write after it read back, and no write or
-  fsync failed. The suite logs the writes whose fsync was in flight and
+  in the lab in most runs of the suite's step for it. The end-to-end suite
+  resets the primary's machine while a host writes 4 KiB to new blocks
+  from four jobs, each write followed by an fsync, and reads every block
+  back after the failover. The step slows what the primary sends to the
+  legs of the pool's meta groups, which slows the pool's commits, so that
+  the reset lands in an fsync. It ran 17 times this way: 13 at one slice
+  and 4 at four slices. In 14 of the 17 runs, at least one write whose
+  fsync was in flight at the reset did not read back from the new
+  primary, while its fsync returned success. That is this loss. In 11
+  runs none of the four such writes read back. In one run the reset
+  landed in a write in each job, not in an fsync, and every write read
+  back. In every run, every write whose fsync had completed before the
+  reset read back. The suite logs the writes whose fsync was in flight and
   does not fail on them.
 - **A flush is not sent through a path read on an older kernel or before
   an upgrade.** Silent. A host reads whether a volume has a volatile write
